@@ -1,0 +1,71 @@
+\section{Experimental Design and Evaluation}
+\label{app:experimental-design}
+
+\subsection{Big Five Personality Framework}
+
+We adopt the Big Five personality model as our theoretical foundation, measuring five core traits:
+
+\begin{itemize}
+\item \textbf{Openness to Experience}: Creativity, curiosity, intellectual engagement
+\item \textbf{Conscientiousness}: Organization, discipline, goal-directed behavior  
+\item \textbf{Extraversion}: Sociability, assertiveness, energy level
+\item \textbf{Agreeableness}: Cooperation, trust, empathy
+\item \textbf{Neuroticism}: Emotional instability, anxiety, negative affect
+\end{itemize}
+
+This framework was selected due to its empirical validation across cultures, widespread adoption in psychological research, and proven applicability to computational personality assessment.
+
+\subsection{Holistic AI Personality Classifier}
+
+For trait measurement, we employ the Holistic AI Personality Classifier, which provides standardized assessment of Big Five traits in language model outputs. The classifier operates through the following process:
+
+\subsubsection{Assessment Protocol}
+1. \textbf{Response Collection}: Models generate responses to personality-relevant prompts
+2. \textbf{Linguistic Analysis}: Text analysis for personality indicators (lexical, syntactic, semantic)
+3. \textbf{Trait Scoring}: Normalized scores on continuous scale per trait
+4. \textbf{Reliability Validation}: Multiple prompts per trait for stable assessment
+
+\subsubsection{Validation Dataset}
+
+Our primary evaluation employs the Holistic AI Personality Manipulation Dataset:
+- Validated prompts: High-trait and low-trait response pairs
+- Cross-trait coverage: Ensures balanced personality assessment
+- Reliability: Validated through the Holistic AI Personality Classifier
+
+\subsection{Downstream Evaluation Benchmarks}
+
+We assess broader impacts using MMLU, GAIA 2023 Level 1, and ambiguous BBQ:
+
+\subsubsection{Massive Multitask Language Understanding (MMLU)}
+- \textbf{Coverage}: 7 strategic subjects; \(N=50\) per subject per run
+- \textbf{Metric}: Accuracy and \(\Delta\) Accuracy\_Avg vs Baseline (within run)
+
+\subsubsection{GAIA (2023 Level 1)}
+- \textbf{Sampling}: \(N=53\) per run
+- \textbf{Metric}: Accuracy and \(\Delta\) Accuracy vs Baseline (within run)
+
+\subsubsection{BBQ (Ambiguous subset)}
+- \textbf{Scope}: Filtered to ambiguous questions using official metadata fields (e.g., context\_condition, question\_polarity, label)
+- \textbf{Metric}: \(S_{AMB}\) and \(\Delta S_{AMB}\) vs Baseline (within run). \(S_{DIS}\) is not used.
+
+\subsection{Statistical Analysis Methodology}
+
+\subsubsection{Performance Impact Measurement}
+
+We compute \(\Delta\) within each method's run: MMLU/GAIA via Accuracy changes; BBQ via \(S_{AMB}\) changes. We avoid comparing absolute baselines across methods.
+
+\subsubsection{Experimental Controls}
+
+\subsubsection{Baseline Establishment}
+- Pre-manipulation assessment: MMLU performance under neutral conditions
+- Control groups: Unmodified models for comparison
+- Consistent evaluation: Same benchmark questions across all experimental conditions
+
+\subsubsection{Confound Mitigation}
+- Prompt contamination: Separate evaluation prompts from conditioning prompts
+- Model consistency: Same model architecture and evaluation protocols
+- Automated assessment: Holistic AI Personality Classifier for standardized evaluation
+
+\subsection{Current Experimental Status}
+
+Completed runs (Gemma-2-2B-IT): prompting, PEFT-LoRA, and activation steering across MMLU, GAIA, and BBQ. Completed runs (LLaMA-3-8B-Instruct): prompting and PEFT across MMLU, GAIA, and BBQ (prompting).

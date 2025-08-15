@@ -1,0 +1,15 @@
+\section{Discussion and Implications}
+
+Our systematic comparison reveals that personality manipulation methods present distinct trade-offs between control strength, stability, and computational requirements, enabling evidence-based selection for specific deployment scenarios.
+
+\textbf{Method Selection Guidance:} For applications requiring strong personality characteristics with acceptable performance trade-offs, prompting remains effective despite computational costs. When preserving task performance is critical, activation steering provides an attractive lightweight alternative. For long-term personality consistency, PEFT offers superior stability with moderate computational overhead.
+
+\textbf{Novel Contributions:} This work establishes activation-based steering as a viable alternative to traditional fine-tuning, achieving competitive personality control (d = 1.22) with minimal downstream impact (-0.4\% MMLU). The layer-wise analysis revealing optimal intervention points (Layer 15 > Layer 10) provides practical implementation guidance (extended analysis in Appendix~\ref{app:activation-steering}).
+
+\textbf{Interpretability Insights:} Our findings suggest personality traits are encoded hierarchically within LLM representations, with social traits (Extraversion, Agreeableness) responding better to deeper layer interventions while cognitive traits (Conscientiousness, Openness) show stronger mid-layer responses. This supports mechanistic understanding of personality representation in neural architectures.
+
+\textbf{Practical Implications:} The demonstrated trade-offs between personality control and task performance highlight the need for careful consideration in production deployments. Our finding that strong personality conditioning can amplify social biases (BBQ +0.08 increase) emphasizes the importance of bias monitoring in personality-conditioned systems.
+
+\textbf{Limitations and Future Work:} Our evaluation focuses on Big Five traits using specific model architectures, potentially limiting generalizability. Future work should explore cultural personality dimensions, multi-method combinations, and real-world deployment studies (extended discussion in Appendix~\ref{app:discussion-extended}).
+
+This research provides both theoretical understanding and practical guidance for responsible personality manipulation in LLMs, establishing systematic evaluation frameworks that can guide future development of personality-conditioned AI systems.

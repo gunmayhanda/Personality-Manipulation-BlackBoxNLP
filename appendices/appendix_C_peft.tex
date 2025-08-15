@@ -1,0 +1,43 @@
+\section{PEFT Methodology and Results}
+\label{app:peft}
+
+\subsection{LoRA Implementation Details}
+
+Our PEFT experiments employ Low-Rank Adaptation (LoRA) to induce personality traits through targeted parameter updates. We implement LoRA adapters on Gemma-2-2B-IT, with infrastructure prepared for LLaMA-3-8B-Instruct.
+
+\subsubsection{Training Configuration}
+- LoRA rank: 64
+- LoRA alpha: 16
+- LoRA dropout: 0.1
+- Target modules: q\_proj, k\_proj, v\_proj, o\_proj, gate\_proj, up\_proj, down\_proj
+- Learning rate: 2e-4
+- Batch size: 2
+- Training epochs: 2
+- Optimizer: AdamW with cosine learning rate scheduling
+
+\subsubsection{Training Data}
+
+Training data consists of the Holistic AI personality manipulation dataset, which provides curated examples that exhibit target personality traits. The dataset enables systematic training across all Big Five personality dimensions.
+
+Dataset composition per trait:
+- Training examples: High-trait and low-trait response pairs
+- Validation examples: Held-out personality assessment prompts
+- Quality threshold: Validated through Holistic AI Personality Classifier
+
+\subsection{PEFT Results (\(\Delta\)-based)}
+
+\subsubsection{Gemma-2-2B-IT}
+MMLU and GAIA deltas are generally negative relative to PEFT's own Baseline, with trait-dependent magnitude; BBQ \(\Delta S_{AMB}\) can be large and negative for some traits. Independent alignment validation shows near-ceiling alignment across traits.
+
+\subsubsection{LLaMA-3-8B-Instruct}
+Within-run \(\Delta\) on MMLU/GAIA is small relative to PEFT's Baseline; we avoid cross-run absolute comparisons. Alignment validation remains high across traits.
+
+\paragraph{Emergent behaviors.} PEFT can surface latent stylistic behaviors (e.g., emoji usage) as a side effect of personality conditioning, consistent with recent observations \citep{jain-2025-peft-emoji}.
+
+\subsubsection{Computational Requirements}
+
+PEFT requires moderate computational resources during training:
+- LoRA parameter updates during fine-tuning
+- Persistent personality changes post-training
+- Efficient inference with minimal overhead
+- Reusable adapters across different personality conditions

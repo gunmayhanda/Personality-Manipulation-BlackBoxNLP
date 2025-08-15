@@ -1,0 +1,9 @@
+\section{Methods}
+
+\textbf{Setup.} We evaluate personality manipulation on Gemma-2-2B-IT and LLaMA-3-8B-Instruct across MMLU (strategic subjects; \(N=50\) per subject), GAIA 2023 Level 1 (\(N=53\)), and BBQ filtered to ambiguous questions using official metadata. We target Big Five traits and report effects \emph{within} each method's run using a relative change (\(\Delta\)) analysis.
+
+\textbf{Manipulation methods.} (1) \emph{Prompting}: full-context persona prompts with exemplars drawn from the Holistic AI personality dataset. (2) \emph{PEFT}: trait-specific LoRA adapters trained on contrastive personality pairs produced from the same dataset. (3) \emph{Activation steering}: add a calibrated vector at a target transformer layer's post-attention layer norm; Gemma vectors use trait contrast.
+
+\textbf{Generation and scoring.} Stage 1 generates responses per benchmark and trait (plus Baseline). Stage 2 scores: MMLU/GAIA by accuracy; BBQ by \(S_{AMB}\) only (we ignore \(S_{DIS}\)). Final-answer extraction uses an Azure GPT judge. Personality alignment on responses is measured via a public classifier, and we additionally run a dedicated alignment task (reported separately) to validate trait expression strength.
+
+\textbf{Primary metrics.} For MMLU and GAIA we report \(\Delta\) Accuracy relative to the method's Baseline; for BBQ we report \(\Delta S_{AMB}\). We use dedicated alignment scores (manipulated vs baseline) as the primary alignment metric and treat benchmark-derived alignment as secondary context.

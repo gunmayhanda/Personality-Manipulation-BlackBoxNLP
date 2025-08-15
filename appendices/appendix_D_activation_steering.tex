@@ -1,0 +1,72 @@
+\section{Activation Steering Methodology and Results}
+\label{app:activation-steering}
+
+\subsection{Steering Vector Derivation}
+
+Our activation-based approach derives steering vectors by analyzing internal model representations during personality-conditioned text generation. We collect responses from Gemma-2-2B under both trait-positive and trait-negative conditions, capturing hidden state activations at layers 5, 10, 15, and 20.
+
+\subsubsection{Data Collection Protocol}
+
+For each Big Five trait, we generate responses under contrasting conditions using the Holistic AI personality manipulation dataset:
+- High-trait and low-trait response pairs from the dataset
+- Activation extraction: Post-attention layer norm activations at target layers
+- Vector computation: Mean difference between trait-positive and trait-negative activations
+
+\subsubsection{Mathematical Formulation}
+
+Steering vectors are computed as the mean difference between trait-positive and trait-negative activations, normalized to unit length for consistent scaling across different traits and layers.
+
+\subsubsection{Vector Calibration}
+
+Steering vectors require calibration to determine optimal intervention strength. We perform linear search across strength values for each target layer, evaluating trait induction effectiveness at each strength using the Holistic AI Personality Classifier.
+
+\subsection{Application Methodology}
+
+During inference, steering vectors are applied by modifying hidden states at the target layer during forward pass, requiring no parameter updates or model retraining.
+
+Our approach is compatible with persona-vector style monitoring and control of character traits \citep{chen-2025-persona-vectors}.
+
+\paragraph{Openness refinement.} When openness alignment plateaued, we refined the direction in two steps: (1) we purified the openness training subset to retain high-confidence examples; (2) we formed a new per-layer direction as the mean activation difference between openness and conscientiousness, normalized, and then combined it with the base openness direction into a single normalized vector. We re-calibrated layer and strength for this combined vector (final choice: layer 15, strength 110) before downstream evaluation.
+
+\subsection{Activation Steering Results (\(\Delta\)-based)}
+
+\subsubsection{Optimal Parameters}
+
+Based on completed experiments, the optimal activation steering parameters for each personality trait are:
+
+\begin{table}[H]
+\centering
+\scriptsize
+{\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{0.95}%
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lSS}
+\toprule
+\textbf{Trait} & {Optimal Layer} & {Optimal Strength} \\
+\midrule
+Openness & 15 & 110.0 \\
+Conscientiousness & 15 & 250.0 \\
+Extraversion & 15 & 200.0 \\
+Agreeableness & 10 & 100.0 \\
+Neuroticism & 15 & 200.0 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}}
+\caption{Optimal layer–strength combinations for activation steering on Gemma-2.}
+\end{table}
+
+Layer 15 achieves optimal performance for most traits, suggesting this depth captures the most relevant personality representations in the Gemma-2-2B architecture.
+
+\subsubsection{Performance Impact}
+
+On Gemma-2, \(\Delta\) Accuracy on MMLU is strongly negative for some traits (e.g., agreeableness) and mixed elsewhere; GAIA \(\Delta\) is generally small and negative. BBQ \(\Delta S_{AMB}\) can be large and negative for select traits. Text quality remains coherent.
+
+\subsubsection{Computational Efficiency}
+
+Activation steering provides significant computational advantages:
+- No parameter updates required
+- Real-time applicability during inference
+- Minimal memory overhead (vector storage only)
+- Efficient personality control without training requirements
+
+\subsubsection{Alignment}
+Independent alignment validation shows statistically significant alignment for steering across assessed traits on Gemma-2.

@@ -1,0 +1,27 @@
+\section{Personality Alignment Results (\(\Delta\)-based)}
+\label{app:alignment}
+
+We report alignment deltas from the dedicated alignment task (manipulated minus baseline) for each trait, model, and method. Results are consistent with persona-vector style behavioral validation \citep{chen-2025-persona-vectors}.
+
+\begin{table}[H]
+\centering
+\scriptsize
+{\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{0.95}%
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lSSSSS}
+\toprule
+& {Ext} & {Agr} & {Neu} & {Ope} & {Con} \\
+\midrule
+G2-P & +0.91 & +0.50 & +0.97 & +0.24 & +0.81 \\
+G2-S & +0.64 & +0.44 & +0.50 & +0.10 & +0.29 \\
+G2-F & +0.78 & +0.97 & +0.95 & +0.21 & +0.78 \\
+L3-P & +0.94 & +0.32 & +0.99 & +0.17 & +0.83 \\
+L3-F & +0.90 & +0.95 & +1.00 & +0.06 & +0.84 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}}
+\caption{Alignment deltas (manipulated minus baseline) from the dedicated alignment task. Abbreviations as in Table~\ref{tab:delta-mmlu}.}
+\label{tab:alignment-delta}
+\end{table}
+
+

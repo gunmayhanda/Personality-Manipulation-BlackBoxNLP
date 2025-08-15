@@ -1,0 +1,104 @@
+\section{Downstream Performance Analysis}
+\label{app:downstream-analysis}
+
+\subsection{Complete Benchmark Results (\(\Delta\)-based)}
+
+We compute \(\Delta\) within each run (method×model) and avoid comparing absolute baselines across methods. Comprehensive \(\Delta\) tables for MMLU (per subject), GAIA, and BBQ (\(S_{AMB}\)) are provided as CSVs in the code release; selected summaries are provided below.
+
+\textbf{MMLU Performance Analysis:} On Gemma-2, prompting yields modest negative \(\Delta\) across traits; steering shows large negative \(\Delta\) for several traits; PEFT shows trait-dependent \(\Delta\), often negative. LLaMA-3 displays small within-run \(\Delta\); we avoid cross-run comparisons.
+
+\textbf{Benchmark Coverage:} We include 7 MMLU subjects, GAIA 2023 Level 1 (\(N=53\)), and ambiguous BBQ with official metadata fields.
+
+\subsection{Delta Tables}
+\FloatBarrier
+
+\subsubsection{MMLU (Delta Accuracy\_Avg; within-run vs Baseline)}
+\begin{table}[H]
+\centering
+\scriptsize
+{\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{0.95}%
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lSSSSS}
+\toprule
+& {Ext} & {Agr} & {Neu} & {Ope} & {Con} \\
+\midrule
+G2-P & -0.06 & -0.07 & -0.08 & -0.07 & -0.07 \\
+G2-S & -0.14 & -0.45 & -0.25 & -0.03 & -0.43 \\
+G2-F & +0.00 & -0.13 & -0.15 & -0.09 & +0.01 \\
+L3-P & -0.01 & -0.01 & +0.00 & -0.02 & -0.04 \\
+L3-F & -0.01 & -0.03 & -0.01 & -0.02 & +0.01 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}}
+\caption{MMLU Delta by trait (Ext, Agr, Neu, Ope, Con) for each model×method: G2=Gemma-2, L3=LLaMA-3; P=Prompting, F=PEFT, S=Steering. Values are changes relative to each method's Baseline within the same run.}
+\label{tab:delta-mmlu}
+\end{table}
+\FloatBarrier
+
+\subsubsection{GAIA (Delta Accuracy; within-run vs Baseline)}
+We use GAIA as a general-assistant reasoning benchmark \citep{mialon-etal-2023-gaia}.
+\begin{table}[H]
+\centering
+\scriptsize
+{\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{0.95}%
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lSSSSS}
+\toprule
+& {Ext} & {Agr} & {Neu} & {Ope} & {Con} \\
+\midrule
+G2-P & +0.08 & +0.09 & +0.06 & +0.08 & +0.08 \\
+G2-F & -0.04 & -0.08 & -0.06 & -0.04 & -0.06 \\
+G2-S & -0.06 & -0.06 & -0.13 & -0.08 & -0.04 \\
+L3-P & -0.02 & -0.04 & -0.06 & +0.00 & +0.00 \\
+L3-F & +0.02 & +0.00 & +0.02 & +0.04 & +0.02 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}}
+\caption{GAIA Delta by trait for each model×method (abbreviations as in Table~\ref{tab:delta-mmlu}).}
+\label{tab:delta-gaia}
+\end{table}
+\FloatBarrier
+
+\subsubsection{BBQ (Delta $S_{AMB}$; within-run vs Baseline)}
+We report $S_{AMB}$ only for the ambiguous subset defined by the official metadata.
+\begin{table}[H]
+\centering
+\scriptsize
+{\setlength{\tabcolsep}{2pt}\renewcommand{\arraystretch}{0.95}%
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lSSSSS}
+\toprule
+& {Ext} & {Agr} & {Neu} & {Ope} & {Con} \\
+\midrule
+G2-P & -2.7 & -0.3 & +7.3 & +1.9 & -1.1 \\
+G2-S & +5.1 & -29.7 & -29.7 & -1.9 & +22.1 \\
+G2-F & -9.4 & -6.0 & -14.3 & +22.3 & -12.4 \\
+L3-P & +3.8 & -2.4 & -10.9 & +13.1 & +10.3 \\
+L3-F & +4.7 & +16.4 & +8.8 & +6.3 & +8.3 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}}
+\caption{BBQ Delta $S_{AMB}$ by trait for each model×method (abbreviations as in Table~\ref{tab:delta-mmlu}); ambiguous subset per official metadata \citep{parrish-etal-2022-bbq}.}
+\label{tab:delta-bbq}
+\end{table}
+\FloatBarrier
+
+\subsection{Bias Analysis (BBQ)}
+
+We report \(S_{AMB}\) and \(\Delta S_{AMB}\) only. On Gemma-2, Steering and PEFT can induce large negative \(\Delta S_{AMB}\) for some traits; prompting effects are smaller.
+
+\subsection{Knowledge Performance (MMLU)}
+
+Per-subject \(\Delta\) tables are included in the code release. Effects vary by subject.
+
+\subsubsection{Difficulty Level Effects}
+
+Performance impact analysis by question difficulty will be conducted as additional MMLU experiments are completed. Current results suggest that personality manipulation effects vary significantly by subject domain rather than difficulty level.
+
+\subsection{Complex Reasoning (GAIA)}
+
+We report within-run \(\Delta\) Accuracy; prompting shows small positive deltas on Gemma-2; PEFT/steering small negative deltas.
+
+\subsection{Trade-off Quantification}
+
+Prompting achieves small \(\Delta\) with strong alignment; PEFT maximizes alignment with often negative \(\Delta\) on Gemma-2; Steering provides moderate alignment with trait-dependent \(\Delta\). No single method maximizes both alignment and capability.

@@ -1,0 +1,11 @@
+\section{Benchmarks and How We Use Them}
+\label{app:benchmarks}
+
+\noindent\textbf{BBQ (Bias Benchmark for Question Answering).} We evaluate social bias with BBQ \citep{parrish-etal-2022-bbq}. We restrict to the ambiguous subset using the official metadata and report only $S_{AMB}$ and $\Delta S_{AMB}$ within each method's run. Here, $S_{AMB}$ is the ambiguous bias score computed on items where the correct answer is ``Unknown/None'': values near 0 indicate minimal bias, positive values indicate stereotypical bias, and negative values indicate anti-stereotypical bias. We do not use $S_{DIS}$ elsewhere in the paper.
+
+\noindent\textbf{GAIA (General AI Assistants).} GAIA measures general-assistant reasoning and real-world knowledge \citep{mialon-etal-2023-gaia}. We use Level 1 (2023) tasks and report Accuracy deltas within each method$\times$model run (no cross-run absolute comparisons).
+
+\noindent\textbf{MMLU.} We sample seven subjects from MMLU \citep{hendrycks-etal-2021-mmlu} and report per-subject and averaged Accuracy deltas within each run. We avoid comparing absolute baselines across different methods (prompting, PEFT, steering) to prevent baseline-mismatch artifacts.
+
+\noindent\textbf{Evaluation principle.} For all benchmarks, we adopt a within-run $\Delta$ framing relative to that method's Baseline and validate personality alignment on an independent task.
+

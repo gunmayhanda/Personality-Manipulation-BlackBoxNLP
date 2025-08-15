@@ -1,0 +1,80 @@
+\documentclass[11pt]{article}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+\usepackage[review]{acl}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+% This is not strictly necessary, and may be commented out,
+% but it will improve the layout of the manuscript,
+% and will typically save some space.
+\usepackage{microtype}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+\usepackage{booktabs}
+\usepackage{adjustbox}
+\usepackage{tabularx}
+\usepackage{siunitx}
+\sisetup{retain-explicit-plus=true}
+\usepackage{float}
+\usepackage[section]{placeins}
+% pgfplots not needed after switching to tables
+
+%Including images in your LaTeX document requires adding
+%additional package(s)
+\usepackage{graphicx}
+\usepackage{textgreek}
+\usepackage{textcomp}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage[colorinlistoftodos,prependcaption,textsize=tiny]{todonotes}
+
+\title{Personality Manipulation in Large Language Models: A Systematic Study of Prompting, Fine-tuning, and Activation Steering Methods}
+
+\author{Author Name 1 \\
+  Institution \\
+  \texttt{email@domain.com} \\\And
+  Author Name 2 \\
+  Institution \\
+  \texttt{email@domain.com} \\}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+While personality design has become common practice in large language models through prompt engineering and fine-tuning, the underlying mechanisms and downstream effects remain poorly understood. This paper presents a systematic investigation of personality manipulation in LLMs through three complementary approaches: prompting, parameter-efficient fine-tuning (PEFT), and activation-based steering vectors. We develop a controlled experimental platform to validate Big Five personality trait induction and measure its impact on bias and task performance. Our study evaluates prompting, LoRA-style PEFT on Gemma-2-2B-IT and LLaMA-3-8B-Instruct, and novel activation steering vectors derived from layer-wise activation differences. Results demonstrate that prompting generates large immediate trait shifts, PEFT produces more stable personality changes, and activation steering achieves competitive effectiveness with lightweight computational requirements. Downstream evaluation on BBQ, MMLU, and GAIA benchmarks reveals distinct trade-offs between personality control strength and task performance across methods. Our findings provide practical guidance for personality design in production systems and establish activation-based steering as a promising alternative to traditional fine-tuning approaches.
+\end{abstract}
+
+\input{sections/01_introduction}
+\input{sections/03_methodology}
+\input{sections/05_results}
+\input{sections/06_discussion}
+
+% Appendices
+\appendix
+\input{appendices/appendix_A_background}
+\input{appendices/appendix_B_prompting}
+\input{appendices/appendix_C_peft}
+\input{appendices/appendix_D_activation_steering}
+\input{appendices/appendix_E_experimental_design}
+\input{appendices/appendix_F_trait_results}
+\input{appendices/appendix_J_alignment_results}
+\input{appendices/appendix_G_downstream_analysis}
+\input{appendices/appendix_H_comparative_analysis}
+\input{appendices/appendix_I_discussion_extended}
+\input{appendices/appendix_K_benchmarks}
+
+% Bibliography entries
+\bibliography{references}
+
+\end{document}

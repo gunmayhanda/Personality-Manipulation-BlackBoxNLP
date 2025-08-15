@@ -1,0 +1,2659 @@
+﻿# ==============================================================================
+#             BIG FIVE PERSONA STEERING - CONSOLIDATED PIPELINE
+#
+# This script consolidates the entire workflow—extraction, calibration,
+# analysis, and demonstration—into a single pipeline that iterates through all
+# five major personality traits.
+#
+# Key Improvements:
+# - Iterates through Extraversion, Agreeableness, Neuroticism, Openness, and
+#   Conscientiousness.
+# - Dynamically saves and loads vector files for each trait.
+# - Strength calibration is adapted to search a much wider range (-300 to 300)
+#   to account for the high strengths needed for this model.
+# - Produces a final summary report comparing the steerability of all traits.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import textwrap
+import random
+from huggingface_hub import login
+from dotenv import load_dotenv
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from datasets import load_dataset # Added for validation convenience
+
+
+# --- 1. Core Configuration & Setup ---
+torch.set_grad_enabled(False)
+load_dotenv(); hf_token = os.getenv("HF_TOKEN")
+if hf_token: login(token=hf_token)
+
+
+# --- Experiment Parameters ---
+MODEL_NAME = "google/gemma-2-2b-it"
+TARGET_LAYERS = [5, 10, 15, 20] # Focused on promising mid-to-late layers
+GENERATION_MAX_TOKENS = 100
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+os.makedirs(VECTORS_CACHE_DIR, exist_ok=True)
+
+
+# The five personality traits we will process
+PERSONALITY_TRAITS = ["extraversion", "agreeableness", "neuroticism", "openness", "conscientiousness"]
+
+
+# --- Load Model, Tokenizer, and Datasets ---
+print(f"--- Loading Model & Tokenizer for {MODEL_NAME} ---")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.chat_template is None:
+    print("WARNING: Tokenizer missing chat template. Manually setting for Gemma.")
+    tokenizer.chat_template = "{% for message in messages %}{{'<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n'}}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"
+print("✓ Model and tokenizer loaded.")
+
+
+print("\n--- Loading Datasets and Classifier ---")
+df_train = pd.read_csv("/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_train.csv")
+df_test = pd.read_csv("/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_test.csv")
+classifier = pipeline("text-classification", model="holistic-ai/personality_classifier", device=model.device)
+print("✓ Datasets and classifier ready.")
+
+
+
+
+# ==============================================================================
+#                      2. MODULAR PIPELINE FUNCTIONS
+# ==============================================================================
+
+
+def extract_vectors_for_trait(trait: str):
+    """
+    Extracts and saves a steering vector for a given personality trait
+    using memory-efficient batching.
+    """
+    print(f"\n--- Extracting vectors for trait: {trait.upper()} ---")
+    
+    df_trait = df_train[df_train['trait_dimension'] == trait].copy().reset_index(drop=True)
+    if df_trait.empty:
+        print(f"No data found for trait '{trait}'. Skipping.")
+        return None
+
+
+    # --- FIX: Define a batch size to process data in chunks ---
+    BATCH_SIZE = 8 # A small batch size is safe for memory.
+    
+    all_pos_activations, all_neg_activations = [], []
+    captured_activations = {}
+    def hook_fn(module, input, output): captured_activations['current'] = output.cpu()
+
+
+    for layer_idx in TARGET_LAYERS:
+        print(f"  Processing Layer {layer_idx}...")
+        target_module = model.model.layers[layer_idx].post_attention_layernorm
+        handle = target_module.register_forward_hook(hook_fn)
+        
+        layer_pos_activations = []
+        layer_neg_activations = []
+
+
+        # --- FIX: Loop through the dataframe in batches ---
+        for i in tqdm(range(0, len(df_trait), BATCH_SIZE), desc=f"  Layer {layer_idx} Batches"):
+            batch_df = df_trait.iloc[i:i+BATCH_SIZE]
+
+
+            # Get positive activations for the batch
+            pos_chats = [[{"role": "user", "content": r['question']}, {"role": "model", "content": r['high_trait_response']}] for _, r in batch_df.iterrows()]
+            pos_texts = [tokenizer.apply_chat_template(c, tokenize=False) for c in pos_chats]
+            inputs = tokenizer(pos_texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(model.device)
+            with torch.no_grad(): # Ensure no gradients are being calculated
+                model(**inputs)
+            # Append the last hidden state of each item in the batch
+            layer_pos_activations.append(captured_activations['current'][:, -1, :].clone())
+
+
+            # Get negative activations for the batch
+            neg_chats = [[{"role": "user", "content": r['question']}, {"role": "model", "content": r['low_trait_response']}] for _, r in batch_df.iterrows()]
+            neg_texts = [tokenizer.apply_chat_template(c, tokenize=False) for c in neg_chats]
+            inputs = tokenizer(neg_texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(model.device)
+            with torch.no_grad():
+                model(**inputs)
+            layer_neg_activations.append(captured_activations['current'][:, -1, :].clone())
+        
+        # --- FIX: Concatenate batch results and store them ---
+        all_pos_activations.append(torch.cat(layer_pos_activations, dim=0))
+        all_neg_activations.append(torch.cat(layer_neg_activations, dim=0))
+
+
+        handle.remove()
+        torch.cuda.empty_cache() # Good practice to clear cache between layers
+
+
+    # Calculate final vectors
+    persona_vectors = {}
+    for i, layer_idx in enumerate(TARGET_LAYERS):
+        # We now have all activations for a layer, so we can calculate the mean
+        diff_vector = (all_pos_activations[i] - all_neg_activations[i]).mean(dim=0)
+        persona_vectors[layer_idx] = (diff_vector / torch.norm(diff_vector)).to(torch.bfloat16)
+    
+    save_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    torch.save(persona_vectors, save_path)
+    print(f"✓ Vectors for '{trait}' saved to {save_path}")
+    return persona_vectors
+    
+
+
+def generate_steered(prompt, vectors, layer_idx, strength):
+    """Generates a single steered response."""
+    hook_handle = None
+    try:
+        if strength != 0.0 and layer_idx in vectors:
+            vec = vectors[layer_idx].to(model.device)
+            def hook(module, input, output): return output + vec.to(output.dtype) * strength
+            target_module = model.model.layers[layer_idx].post_attention_layernorm
+            hook_handle = target_module.register_forward_hook(hook)
+        
+        chat = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        attention_mask = torch.ones_like(input_ids)
+        
+        output_ids = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=GENERATION_MAX_TOKENS, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+    finally:
+        if hook_handle: hook_handle.remove()
+
+
+def calibrate_and_analyze(trait: str, vectors: dict):
+    """Calibrates strengths, finds the optimal combination, and plots results."""
+    print(f"\n--- Calibrating and analyzing for trait: {trait.upper()} ---")
+    
+    # ADAPTATION: Use a much wider range for strength tuning
+    STRENGTH_RANGE = np.linspace(-300, 300, 13) # -300, -250, ..., 250, 300
+    
+    df_test_trait = df_test[df_test['trait_dimension'] == trait]
+    sample_prompts = df_test_trait.drop_duplicates(subset=['question']).head(5)['question'].tolist() # Use 5 questions for speed
+    
+    results = []
+    for layer in TARGET_LAYERS:
+        for strength in STRENGTH_RANGE:
+            hits = 0
+            for prompt in sample_prompts:
+                response = generate_steered(prompt, vectors, layer, strength)
+                prediction = classifier(response, truncation=True)[0]['label']
+                if prediction == trait:
+                    hits += 1
+            accuracy = hits / len(sample_prompts)
+            results.append({'trait': trait, 'layer': layer, 'strength': strength, 'accuracy': accuracy})
+    
+    results_df = pd.DataFrame(results)
+    
+    # Find optimal positive combination
+    pos_results = results_df[results_df['strength'] > 0]
+    if not pos_results.empty:
+        best_row = pos_results.loc[pos_results['accuracy'].idxmax()]
+        optimal_layer, optimal_strength, max_accuracy = int(best_row['layer']), best_row['strength'], best_row['accuracy']
+        print(f"🎯 Optimal for '{trait}': Layer {optimal_layer} at Strength {optimal_strength:.1f} -> Accuracy: {max_accuracy:.1%}")
+    else:
+        optimal_layer, optimal_strength, max_accuracy = None, None, 0.0
+        print(f"Could not determine optimal settings for '{trait}'.")
+
+
+    # Plotting
+    plt.figure(figsize=(7, 4))
+    for layer in TARGET_LAYERS:
+        layer_data = results_df[results_df['layer'] == layer]
+        plt.plot(layer_data['strength'], layer_data['accuracy'], 'o-', label=f'Layer {layer}')
+    plt.title(f'Calibration for {trait.title()}'); plt.xlabel('Steering Strength'); plt.ylabel('Alignment Accuracy')
+    plt.grid(True, alpha=0.5); plt.legend(); plt.show()
+    
+    return optimal_layer, optimal_strength, max_accuracy
+
+
+def run_demonstration(trait, vectors, layer, strength):
+    """Shows a comparison of baseline, positive, and negative steering."""
+    if layer is None: return
+    print(f"\n--- Demonstration for: {trait.upper()} (Layer {layer}, Strength {strength:.1f}) ---")
+    prompt = "I have a completely free weekend with no obligations. Describe the ideal plan for Saturday."
+    
+    baseline = generate_steered(prompt, vectors, layer, 0.0)
+    positive = generate_steered(prompt, vectors, layer, strength)
+    negative = generate_steered(prompt, vectors, layer, -strength)
+    
+    print(f"PROMPT: '{prompt}'")
+    print("\n--- BASELINE (Strength 0.0) ---")
+    print(textwrap.fill(baseline, width=80))
+    print(f"\n--- POSITIVE STEERING (+{strength:.1f}) ---")
+    print(textwrap.fill(positive, width=80))
+    print(f"\n--- NEGATIVE STEERING (-{strength:.1f}) ---")
+    print(textwrap.fill(negative, width=80))
+
+
+
+
+# ==============================================================================
+#                        3. MAIN EXECUTION PIPELINE
+# ==============================================================================
+
+
+final_report_data = []
+
+
+for trait in PERSONALITY_TRAITS:
+    print("\n\n" + "="*80)
+    print(f" " * 25 + f"PROCESSING TRAIT: {trait.upper()}")
+    print("="*80)
+    
+    # --- PHASE 1: Get steering vectors (load from cache or create) ---
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if os.path.exists(vector_path):
+        print(f"Loading cached vectors for '{trait}'...")
+        persona_vectors = torch.load(vector_path)
+    else:
+        persona_vectors = extract_vectors_for_trait(trait)
+    
+    if persona_vectors is None:
+        continue
+
+
+    # --- PHASE 2: Calibrate, find optimal settings, and analyze ---
+    opt_layer, opt_strength, max_acc = calibrate_and_analyze(trait, persona_vectors)
+    final_report_data.append({
+        'trait': trait,
+        'optimal_layer': opt_layer,
+        'optimal_strength': opt_strength,
+        'max_accuracy': max_acc
+    })
+
+
+    # --- PHASE 3: Run a qualitative demonstration ---
+    run_demonstration(trait, persona_vectors, opt_layer, opt_strength)
+
+
+# ==============================================================================
+#                           4. FINAL SUMMARY REPORT
+# ==============================================================================
+print("\n\n" + "="*80)
+print(f" " * 28 + f"FINAL SUMMARY REPORT")
+print("="*80)
+
+
+summary_df = pd.DataFrame(final_report_data)
+summary_df['max_accuracy'] = summary_df['max_accuracy'].map('{:.1%}'.format)
+summary_df = summary_df.set_index('trait')
+
+
+print(summary_df)
+print("\n--- Experiment Complete ---")
+import pandas as pd
+import numpy as np
+from transformers import pipeline
+from tqdm.auto import tqdm
+
+
+#==============================================================================
+#          FINAL REFINEMENT PIPELINE WITH HYBRID SEARCH (v2)
+#
+# This version re-introduces detailed logging for the initial binary search
+# phase, making the algorithm's two-phase process fully transparent.
+#==============================================================================
+
+
+# --- 1. Load Prerequisite Models and Data ---
+try:
+    _ = model, tokenizer, classifier, df_test, generate_steered
+    print("--- Loading Gibberish Detector ---")
+    gibberish_detector = pipeline("text-classification", model="madhurjindal/autonlp-Gibberish-Detector-492513457", device=model.device)
+    print("✓ All prerequisite models and data are ready.")
+except NameError:
+    print("ERROR: Prerequisite variables not found. Please run the main experiment pipeline first.")
+    raise
+
+
+# --- 2. The Refinement Function with Hybrid Search & Logging ---
+
+
+def check_strength(prompt_list, trait, vectors, layer, strength):
+    """Helper function to test a single strength and return metrics."""
+    hits, clean_count = 0, 0
+    for prompt in prompt_list:
+        response = generate_steered(prompt, vectors, layer, strength)
+        if not response: continue
+        
+        personality_pred = classifier(response, truncation=True)[0]['label']
+        gibberish_pred = gibberish_detector(response, truncation=True)[0]['label']
+        
+        if personality_pred == trait: hits += 1
+        if gibberish_pred == 'clean': clean_count += 1
+            
+    return hits / len(prompt_list), clean_count / len(prompt_list)
+
+
+def refine_with_hybrid_search(trait, layer, original_strength, vectors):
+    """
+    Finds the optimal steering strength using a two-phase hybrid search.
+    """
+    print("\n" + "="*80)
+    print(f" " * 15 + f"REFINING TUNING FOR '{trait.upper()}' AT LAYER {layer} (Hybrid Search)")
+    print("="*80)
+
+
+    SAMPLES_PER_CHECK, CLEANLINESS_THRESHOLD = 15, 0.99
+    
+    test_prompts = df_test[df_test['trait_dimension'] == trait] \
+        .drop_duplicates(subset=['question']).head(SAMPLES_PER_CHECK)['question'].tolist()
+    
+    # --- PHASE 1: Find the 'Cliff Edge' with a Coarse Binary Search ---
+    print("--- Phase 1: Finding the highest safe strength (Boundary Search)... ---")
+    lo, hi = 0.0, abs(original_strength) * 1.2 if original_strength != 0 else 50.0
+    highest_safe_strength = 0.0
+
+
+    # Binary search to find the upper boundary of coherence
+    for i in range(7): 
+        mid = (lo + hi) / 2
+        strength_to_test = mid if original_strength >= 0 else -mid
+        
+        # Capture both accuracy and cleanliness for logging
+        accuracy, cleanliness = check_strength(test_prompts, trait, vectors, layer, strength_to_test)
+        
+        # <<--- ADDED BACK: The detailed print statement for each iteration ---
+        print(f"  Iter {i+1}: Strength={strength_to_test:.1f} -> Accuracy={accuracy:.1%}, Cleanliness={cleanliness:.1%}")
+
+
+        if cleanliness >= CLEANLINESS_THRESHOLD:
+            highest_safe_strength = mid 
+            lo = mid 
+        else:
+            hi = mid 
+
+
+    print(f"✓ Boundary search complete. Highest safe strength found near: {highest_safe_strength:.1f}")
+
+
+    # --- PHASE 2: Fine-Grained Search within the Safe Zone ---
+    print("\n--- Phase 2: Searching for peak accuracy within the safe zone... ---")
+    best_strength, best_accuracy = 0.0, -1.0
+    
+    scan_range = np.linspace(0, highest_safe_strength, 11)
+    
+    for strength_val in tqdm(scan_range, desc="Fine-tuning"):
+        strength_to_test = strength_val if original_strength >= 0 else -strength_val
+        accuracy, cleanliness = check_strength(test_prompts, trait, vectors, layer, strength_to_test)
+        
+        if cleanliness >= CLEANLINESS_THRESHOLD and accuracy > best_accuracy:
+            best_accuracy = accuracy
+            best_strength = strength_to_test
+    
+    final_accuracy, final_cleanliness = check_strength(test_prompts, trait, vectors, layer, best_strength)
+    return best_strength, final_accuracy, final_cleanliness
+
+
+
+
+# --- 3. Main Refinement Loop ---
+# (This part of the code remains the same)
+try: _ = final_report_data
+except NameError:
+    final_report_data = [
+        {'trait': 'extraversion', 'optimal_layer': 15, 'optimal_strength': 200.0, 'max_accuracy': 0.8},
+        {'trait': 'agreeableness', 'optimal_layer': 10, 'optimal_strength': 100.0, 'max_accuracy': 0.8},
+        {'trait': 'neuroticism', 'optimal_layer': 5, 'optimal_strength': 300.0, 'max_accuracy': 1.0},
+        {'trait': 'openness', 'optimal_layer': 10, 'optimal_strength': 50.0, 'max_accuracy': 0.8},
+        {'trait': 'conscientiousness', 'optimal_layer': 15, 'optimal_strength': 100.0, 'max_accuracy': 0.6}
+    ]
+
+
+refined_results = []
+for report_item in final_report_data:
+    trait, layer, original_strength = report_item['trait'], report_item['optimal_layer'], report_item['optimal_strength']
+    if layer is None: continue
+
+
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path): continue
+    
+    vectors = torch.load(vector_path)
+    refined_strength, final_accuracy, final_cleanliness = refine_with_hybrid_search(trait, layer, original_strength, vectors)
+    
+    refined_results.append({
+        'Trait': trait, 'Optimal Layer': layer, 'Original Strength': original_strength,
+        'Original Accuracy': report_item['max_accuracy'], 'Refined Strength': refined_strength,
+        'Final Accuracy': final_accuracy, 'Final Cleanliness': final_cleanliness
+    })
+
+
+
+
+# --- 4. Final Comparison Report ---
+# (This part of the code also remains the same)
+print("\n\n" + "="*90)
+print(f" " * 22 + f"FINAL REFINED STEERING PARAMETERS (HYBRID SEARCH)")
+print("="*90)
+if refined_results:
+    refined_df = pd.DataFrame(refined_results).set_index('Trait')
+    for col in ['Original Accuracy', 'Final Accuracy', 'Final Cleanliness']:
+        refined_df[col] = refined_df[col].map('{:.1%}'.format)
+    for col in ['Original Strength', 'Refined Strength']:
+         refined_df[col] = refined_df[col].map('{:.1f}'.format)
+    print(refined_df)
+else:
+    print("No refinement results were generated.")
+print("="*90)
+import pandas as pd
+import numpy as np
+from transformers import pipeline
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+
+
+#==============================================================================
+#       DEFINITIVE REFINEMENT PIPELINE (v5 - Intelligent Binary Scout)
+#
+# This version implements the user's final proposed algorithm:
+#
+# 1. Phase 1 (Binary Scout): A fast binary search that remembers the best
+#    *safe* point (Accuracy * Cleanliness) it encounters.
+# 2. Phase 2 (Local Zoom): A fine-grained linear scan in a narrow window
+#    around the best point found in Phase 1 to find the precise peak.
+#
+# This is the most robust and efficient algorithm developed.
+#==============================================================================
+
+
+# --- 1. Load Prerequisite Models and Data ---
+try:
+    _ = model, tokenizer, classifier, df_test, generate_steered, gibberish_detector
+    print("✓ All prerequisite models and data are ready.")
+except NameError:
+    print("ERROR: Prerequisite variables not found. Please run all previous pipeline cells first.")
+    raise
+
+
+# --- 2. The Definitive Refinement and Plotting Functions ---
+
+
+def check_strength(prompt_list, trait, vectors, layer, strength):
+    """Helper function to test a single strength and return metrics."""
+    hits, clean_count = 0, 0
+    for prompt in prompt_list:
+        response = generate_steered(prompt, vectors, layer, strength)
+        if not response: continue
+        
+        personality_pred = classifier(response, truncation=True)[0]['label']
+        gibberish_pred = gibberish_detector(response, truncation=True)[0]['label']
+        
+        if personality_pred == trait: hits += 1
+        if gibberish_pred == 'clean': clean_count += 1
+            
+    return hits / len(prompt_list), clean_count / len(prompt_list)
+
+
+def plot_search_history(history_df, trait, layer, final_strength):
+    """Visualizes the points tested during the search process."""
+    if history_df.empty: return
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    
+    ax1.plot(history_df['strength'], history_df['accuracy'], 'o', color='tab:blue', label='Accuracy')
+    ax1.set_xlabel('Steering Strength')
+    ax1.set_ylabel('Accuracy', color='tab:blue')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    
+    ax2 = ax1.twinx()
+    ax2.plot(history_df['strength'], history_df['cleanliness'], 'x', color='tab:green', label='Cleanliness')
+    ax2.set_ylabel('Cleanliness', color='tab:green')
+    ax2.tick_params(axis='y', labelcolor='tab:green')
+    
+    ax1.axvline(x=final_strength, color='r', linestyle=':', lw=2.5, label=f'Final Strength ({final_strength:.2f})')
+    
+    fig.suptitle(f"Search History for '{trait.title()}' at Layer {layer}")
+    fig.legend(loc='upper right', bbox_to_anchor=(0.9, 0.9))
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+
+def refine_with_binary_scout(trait, layer, vectors):
+    """
+    Finds the optimal steering strength using your intelligent binary scout method.
+    """
+    print(f"\n{'='*80}\nREFINING '{trait.upper()}' AT LAYER {layer} (Intelligent Binary Scout)\n{'='*80}")
+
+
+    SAMPLES_PER_CHECK, CLEANLINESS_THRESHOLD = 15, 0.90
+    search_history = []
+    test_prompts = df_test[df_test['trait_dimension'] == trait].drop_duplicates('question').head(SAMPLES_PER_CHECK)['question'].tolist()
+
+
+    def evaluate(strength):
+        acc, clean = check_strength(test_prompts, trait, vectors, layer, strength)
+        search_history.append({'strength': strength, 'accuracy': acc, 'cleanliness': clean})
+        return acc, clean
+
+
+    # --- PHASE 1: Intelligent Binary Search ("Scout") ---
+    print("--- Phase 1: Binary scouting for the most promising point... ---")
+    lo, hi = -300.0, 300.0 # Search the full range
+    
+    best_safe_strength_p1, max_safe_score_p1 = 0.0, -1.0
+
+
+    for i in range(8): # 8 iterations to explore the wide range
+        # Test two points to decide which direction to go
+        p1 = lo + (hi - lo) / 3
+        p2 = hi - (hi - lo) / 3
+        
+        acc1, clean1 = evaluate(p1)
+        score1 = acc1 * clean1 if clean1 >= CLEANLINESS_THRESHOLD else -1
+
+
+        acc2, clean2 = evaluate(p2)
+        score2 = acc2 * clean2 if clean2 >= CLEANLINESS_THRESHOLD else -1
+        
+        # Keep track of the best point seen so far
+        if score1 > max_safe_score_p1: max_safe_score_p1, best_safe_strength_p1 = score1, p1
+        if score2 > max_safe_score_p1: max_safe_score_p1, best_safe_strength_p1 = score2, p2
+
+
+        # Ternary search logic to narrow down the range
+        if score1 > score2: hi = p2
+        else: lo = p1
+
+
+    print(f"✓ Scout phase complete. Most promising point found at Strength ~{best_safe_strength_p1:.1f}")
+
+
+    # --- PHASE 2: Fine-Grained Local Scan ("Zoom") ---
+    print("\n--- Phase 2: Zooming in on the peak... ---")
+    zoom_width = 30.0
+    zoom_lo, zoom_hi = best_safe_strength_p1 - zoom_width, best_safe_strength_p1 + zoom_width
+    fine_range = np.linspace(zoom_lo, zoom_hi, 11)
+    
+    final_best_strength, final_max_score = best_safe_strength_p1, max_safe_score_p1
+    
+    for strength_to_test in tqdm(fine_range, desc=f"Zooming L{layer}", leave=False):
+        accuracy, cleanliness = evaluate(strength_to_test)
+        combined_score = accuracy * cleanliness if cleanliness >= CLEANLINESS_THRESHOLD else -1
+        
+        if combined_score > final_max_score:
+            final_max_score, final_best_strength = combined_score, strength_to_test
+            
+    final_accuracy, final_cleanliness = check_strength(test_prompts, trait, vectors, layer, final_best_strength)
+
+
+    # Plot the full search history
+    history_df = pd.DataFrame(search_history).drop_duplicates('strength').sort_values('strength')
+    plot_search_history(history_df, trait, layer, final_best_strength)
+
+
+    return final_best_strength, final_accuracy, final_cleanliness, final_max_score
+
+
+
+
+# --- 3. The Comprehensive Main Refinement Loop ---
+# (This remains the same, but calls our best function yet)
+TARGET_LAYERS = [5, 10, 15, 20]
+PERSONALITY_TRAITS = ["extraversion", "agreeableness", "neuroticism", "openness", "conscientiousness"]
+all_refined_results = []
+
+
+for trait in PERSONALITY_TRAITS:
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path): continue
+    vectors = torch.load(vector_path, weights_only=True)
+    
+    for layer in TARGET_LAYERS:
+        strength, acc, clean, score = refine_with_binary_scout(trait, layer, vectors)
+        all_refined_results.append({
+            'Trait': trait, 'Layer': layer, 'Refined Strength': strength,
+            'Final Accuracy': acc, 'Final Cleanliness': clean, 'Combined Score': score
+        })
+
+
+# --- 4. Final Report Generation ---
+# (This also remains the same)
+print("\n\n" + "="*90); print(f" " * 22 + f"DEFINITIVE STEERING PARAMETER REPORT"); print("="*90)
+if all_refined_results:
+    all_results_df = pd.DataFrame(all_refined_results)
+    best_results_idx = all_results_df.groupby('Trait')['Combined Score'].idxmax()
+    final_summary_df = all_results_df.loc[best_results_idx].set_index('Trait').drop(columns=['Combined Score'])
+    for col in ['Final Accuracy', 'Final Cleanliness']: final_summary_df[col] = final_summary_df[col].map('{:.1%}'.format)
+    final_summary_df['Refined Strength'] = final_summary_df['Refined Strength'].map('{:.1f}'.format)
+    print("The single best layer and strength combination for each trait is:\n"); print(final_summary_df)
+print("="*90)
+# ==============================================================================
+#             DEFINITIVE VALIDATION OF FINAL PARAMETERS
+#
+# This self-contained cell performs a large-scale validation (100 samples)
+# for the five specific (trait, layer, strength) combinations identified
+# as optimal. It loads all necessary models and data from scratch and
+# produces a final report on personality alignment and text coherence.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from tqdm.auto import tqdm
+import textwrap
+
+
+# --- 1. Core Configuration & Setup ---
+print("--- Initializing Configuration ---")
+
+
+# Define the specific configurations to test
+FINAL_CONFIGURATIONS = [
+    {'trait': 'extraversion',      'layer': 15, 'strength': 200.0},
+    {'trait': 'agreeableness',     'layer': 10, 'strength': 100.0},
+    {'trait': 'neuroticism',       'layer': 15, 'strength': 200.0},
+    {'trait': 'openness',          'layer': 20, 'strength': 50.0},
+    {'trait': 'conscientiousness', 'layer': 15, 'strength': 100.0}
+]
+
+
+# Paths and Parameters
+MODEL_NAME = "google/gemma-2-2b-it"
+TEST_CSV_PATH = "/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_test.csv"
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+SAMPLES_TO_TEST = 100
+
+
+# --- 2. Load All Models, Tokenizer, and Data ---
+print("\n--- Loading All Necessary Assets (this may take a moment) ---")
+torch.set_grad_enabled(False)
+
+
+# Load Main Model and Tokenizer
+try:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.bfloat16,
+        device_map="auto"
+    )
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    print("✓ Main LLM and tokenizer loaded.")
+except Exception as e:
+    print(f"FATAL: Could not load the main model. Error: {e}")
+    raise
+
+
+# Load Classifier Pipelines
+try:
+    personality_classifier = pipeline("text-classification", model="holistic-ai/personality_classifier", device=model.device)
+    print("✓ Personality classifier loaded.")
+    gibberish_detector = pipeline("text-classification", model="madhurjindal/autonlp-Gibberish-Detector-492513457", device=model.device)
+    print("✓ Gibberish detector loaded.")
+except Exception as e:
+    print(f"FATAL: Could not load classifier models. Error: {e}")
+    raise
+
+
+# Load Test Data
+try:
+    df_test_full = pd.read_csv(TEST_CSV_PATH)
+    print("✓ Test dataset loaded.")
+except FileNotFoundError:
+    print(f"FATAL: Test data not found at {TEST_CSV_PATH}")
+    raise
+
+
+# --- 3. Steered Generation Helper Function ---
+def generate_final_steered(prompt: str, steering_vector: torch.Tensor, layer_idx: int, strength: float):
+    """A clean generation function for the final validation."""
+    hook_handle = None
+    try:
+        # The hook uses the pre-loaded, device-ready vector
+        def steering_hook(module, input, output):
+            return output + steering_vector.to(output.dtype) * strength
+        
+        target_module = model.model.layers[layer_idx].post_attention_layernorm
+        hook_handle = target_module.register_forward_hook(steering_hook)
+
+
+        # Prepare input
+        chat = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        attention_mask = torch.ones_like(input_ids)
+
+
+        # Generate
+        output_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=100,
+            do_sample=True,
+            temperature=0.7,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+    finally:
+        if hook_handle:
+            hook_handle.remove()
+
+
+# --- 4. Main Validation Loop ---
+final_results = []
+
+
+for config in FINAL_CONFIGURATIONS:
+    trait = config['trait']
+    layer = config['layer']
+    strength = config['strength']
+
+
+    print("\n" + "="*80)
+    print(f" " * 15 + f"VALIDATING: {trait.upper()} at Layer {layer}, Strength {strength}")
+    print("="*80)
+
+
+    # Load the required steering vector file
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path):
+        print(f"⚠️ SKIPPING: Vector file not found for '{trait}' at {vector_path}")
+        continue
+    
+    # Use weights_only=True for security and to suppress warnings
+    persona_vectors = torch.load(vector_path, weights_only=True, map_location=model.device)
+    
+    if layer not in persona_vectors:
+        print(f"⚠️ SKIPPING: Layer {layer} not found in the vector file for '{trait}'.")
+        continue
+        
+    steering_vector = persona_vectors[layer]
+
+
+    # Prepare the 100 test prompts for this trait
+    prompts = df_test_full[df_test_full['trait_dimension'] == trait] \
+        .drop_duplicates(subset=['question']).head(SAMPLES_TO_TEST)['question'].tolist()
+    
+    if len(prompts) < SAMPLES_TO_TEST:
+        print(f"NOTE: Found only {len(prompts)} unique prompts for '{trait}'. Testing with this amount.")
+
+
+    # Run the validation
+    hits, clean_count = 0, 0
+    for prompt in tqdm(prompts, desc=f"Testing {trait.title()}"):
+        response = generate_final_steered(prompt, steering_vector, layer, strength)
+        if not response: continue
+
+
+        # Evaluate with both classifiers
+        personality_pred = personality_classifier(response, truncation=True)[0]['label']
+        gibberish_pred = gibberish_detector(response, truncation=True)[0]['label']
+
+
+        if personality_pred == trait:
+            hits += 1
+        if gibberish_pred == 'clean':
+            clean_count += 1
+            
+    # Calculate final metrics
+    accuracy = (hits / len(prompts)) if prompts else 0
+    cleanliness = (clean_count / len(prompts)) if prompts else 0
+
+
+    final_results.append({
+        'Trait': trait.title(),
+        'Layer': layer,
+        'Strength': strength,
+        'Accuracy': accuracy,
+        'Cleanliness': cleanliness
+    })
+
+
+# --- 5. Final Report ---
+print("\n\n" + "="*80)
+print(f" " * 24 + f"DEFINITIVE VALIDATION REPORT")
+print(f" " * 25 + f"(Based on {SAMPLES_TO_TEST} samples per trait)")
+print("="*80)
+
+
+if not final_results:
+    print("No validation tests were completed.")
+else:
+    results_df = pd.DataFrame(final_results).set_index('Trait')
+    
+    # Formatting for nice display
+    results_df['Accuracy'] = results_df['Accuracy'].map('{:.1%}'.format)
+    results_df['Cleanliness'] = results_df['Cleanliness'].map('{:.1%}'.format)
+    
+    print(results_df.to_string())
+
+
+print("\n--- Validation Complete ---")
+# ==============================================================================
+#      DEFINITIVE VALIDATION WITH BASELINE COMPARISON (FINAL VERSION)
+#
+# This self-contained cell performs a large-scale validation of the final
+# chosen parameters against an unsteered baseline. It quantifies the exact
+# "lift" or improvement provided by each steering vector.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from tqdm.auto import tqdm
+import textwrap
+import warnings
+
+
+# --- Core Configuration ---
+warnings.filterwarnings('ignore')
+os.environ['TORCHDYNAMO_DISABLE'] = '1'
+
+
+# Disable torch compilation
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.disable()
+torch.compiler.disable()
+print("TorchDynamo compiler explicitly disabled.")
+
+
+# --- 1. Core Configuration & Setup ---
+print("--- Initializing Configuration ---")
+
+
+FINAL_CONFIGURATIONS = [
+    {'trait': 'extraversion',      'layer': 15, 'strength': 200.0},
+    {'trait': 'agreeableness',     'layer': 10, 'strength': 100.0},
+    {'trait': 'neuroticism',       'layer': 15, 'strength': 200.0},
+    {'trait': 'openness',          'layer': 20, 'strength': 50.0},
+    {'trait': 'conscientiousness', 'layer': 15, 'strength': 250.0}
+]
+
+
+MODEL_NAME = "google/gemma-2-2b-it"
+TEST_CSV_PATH = "/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_test.csv"
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+SAMPLES_TO_TEST = 100
+
+
+# --- 2. Load All Necessary Assets ---
+print("\n--- Loading All Necessary Assets ---")
+torch.set_grad_enabled(False)
+
+
+try:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    print("✓ Main LLM and tokenizer loaded.")
+    
+    personality_classifier = pipeline("text-classification", model="holistic-ai/personality_classifier", device=model.device)
+    print("✓ Personality classifier loaded.")
+    gibberish_detector = pipeline("text-classification", model="madhurjindal/autonlp-Gibberish-Detector-492513457", device=model.device)
+    print("✓ Gibberish detector loaded.")
+    
+    df_test_full = pd.read_csv(TEST_CSV_PATH)
+    print("✓ Test dataset loaded.")
+except Exception as e:
+    print(f"FATAL: Could not load assets. Error: {e}")
+    raise
+
+
+# --- 3. Steered Generation Helper Function ---
+def generate_final_steered(prompt: str, steering_vector: torch.Tensor, layer_idx: int, strength: float):
+    """A clean generation function for the final validation."""
+    # A strength of 0 means no hook is needed
+    if strength == 0.0:
+        hook_handle = None
+    else:
+        def steering_hook(module, input, output):
+            return output + steering_vector.to(output.dtype) * strength
+        target_module = model.model.layers[layer_idx].post_attention_layernorm
+        hook_handle = target_module.register_forward_hook(steering_hook)
+        
+    try:
+        chat = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        attention_mask = torch.ones_like(input_ids)
+
+
+        output_ids = model.generate(
+            input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=100,
+            do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id
+        )
+        return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+    finally:
+        if hook_handle: hook_handle.remove()
+
+
+# --- 4. Main Validation Loop ---
+final_results = []
+
+
+for config in FINAL_CONFIGURATIONS:
+    trait, layer, strength = config['trait'], config['layer'], config['strength']
+    print("\n" + "="*80); print(f" " * 15 + f"VALIDATING: {trait.upper()} at Layer {layer}, Strength {strength}"); print("="*80)
+
+
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path):
+        print(f"⚠️ SKIPPING: Vector file not found for '{trait}'.")
+        continue
+    
+    persona_vectors = torch.load(vector_path, weights_only=True, map_location=model.device)
+    if layer not in persona_vectors:
+        print(f"⚠️ SKIPPING: Layer {layer} not found for '{trait}'.")
+        continue
+    steering_vector = persona_vectors[layer]
+
+
+    prompts = df_test_full[df_test_full['trait_dimension'] == trait].drop_duplicates('question').head(SAMPLES_TO_TEST)['question'].tolist()
+    if len(prompts) < SAMPLES_TO_TEST:
+        print(f"NOTE: Found only {len(prompts)} unique prompts for '{trait}'.")
+
+
+    baseline_hits, steered_hits, steered_clean_count = 0, 0, 0
+    
+    for prompt in tqdm(prompts, desc=f"Testing {trait.title()}"):
+        # Generate both baseline and steered responses
+        baseline_response = generate_final_steered(prompt, steering_vector, layer, 0.0)
+        steered_response = generate_final_steered(prompt, steering_vector, layer, strength)
+
+
+        # Evaluate both responses
+        if baseline_response:
+            baseline_pred = personality_classifier(baseline_response, truncation=True)[0]['label']
+            if baseline_pred == trait: baseline_hits += 1
+        
+        if steered_response:
+            steered_pred = personality_classifier(steered_response, truncation=True)[0]['label']
+            gibberish_pred = gibberish_detector(steered_response, truncation=True)[0]['label']
+            if steered_pred == trait: steered_hits += 1
+            if gibberish_pred == 'clean': steered_clean_count += 1
+            
+    # Calculate final metrics
+    num_prompts = len(prompts)
+    baseline_accuracy = (baseline_hits / num_prompts) if num_prompts else 0
+    steered_accuracy = (steered_hits / num_prompts) if num_prompts else 0
+    steered_cleanliness = (steered_clean_count / num_prompts) if num_prompts else 0
+
+
+    final_results.append({
+        'Trait': trait.title(), 'Layer': layer, 'Strength': strength,
+        'Baseline Accuracy': baseline_accuracy, 'Steered Accuracy': steered_accuracy,
+        'Cleanliness': steered_cleanliness
+    })
+
+
+# --- 5. Final Report ---
+print("\n\n" + "="*80)
+print(f" " * 20 + f"DEFINITIVE VALIDATION REPORT W/ BASELINE")
+print(f" " * 25 + f"(Based on {SAMPLES_TO_TEST} samples per trait)")
+print("="*80)
+
+
+if not final_results:
+    print("No validation tests were completed.")
+else:
+    results_df = pd.DataFrame(final_results).set_index('Trait')
+    # Calculate the improvement
+    results_df['Improvement'] = results_df['Steered Accuracy'] - results_df['Baseline Accuracy']
+    
+    # Formatting for nice display
+    for col in ['Baseline Accuracy', 'Steered Accuracy', 'Cleanliness', 'Improvement']:
+        results_df[col] = results_df[col].map('{:+.1%}'.format if col == 'Improvement' else '{:.1%}'.format)
+    
+    print(results_df.to_string())
+
+
+print("\n--- Validation Complete ---")
+# ==============================================================================
+#            MANUAL VERIFICATION OF FINAL STEERING PARAMETERS
+#
+# This self-contained cell performs a qualitative "sanity check" on the five
+# final chosen steering configurations. It generates responses for a diverse
+# set of prompts to allow for a manual assessment of coherence and alignment.
+# ==============================================================================
+
+
+import torch
+import os
+import textwrap
+import warnings
+
+
+# Suppress the torch.load warning for cleanliness
+warnings.filterwarnings("ignore", message=".*weights_only=False.*")
+
+
+# --- 1. Configuration ---
+print("--- Initializing Final Configurations for Manual Verification ---")
+
+
+FINAL_CONFIGURATIONS = [
+    {'trait': 'extraversion',      'layer': 15, 'strength': 200.0},
+    {'trait': 'agreeableness',     'layer': 10, 'strength': 100.0},
+    {'trait': 'neuroticism',       'layer': 15, 'strength': 200.0},
+    {'trait': 'openness',          'layer': 20, 'strength': 50.0},
+    {'trait': 'conscientiousness', 'layer': 15, 'strength': 250.0}
+]
+
+
+MODEL_NAME = "google/gemma-2-2b-it"
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+
+
+# A diverse set of prompts to test the different facets of personality
+TEST_PROMPTS = [
+    {
+        "name": "Social Scenario",
+        "prompt": "I'm at a large networking event where I only know the host. What's the best strategy to meet people?"
+    },
+    {
+        "name": "Weekend Planning",
+        "prompt": "I have a completely free weekend with no obligations. Describe the ideal plan for Saturday."
+    },
+    {
+        "name": "Receiving Feedback",
+        "prompt": "My boss just gave me some unexpected critical feedback on a project I worked hard on. How should I react?"
+    },
+    {
+        "name": "Creative Brainstorm",
+        "prompt": "We need to come up with a completely new and unconventional marketing idea for a boring product. What's our first step?"
+    },
+    {
+        "name": "Team Project",
+        "prompt": "I've been assigned to a group project with a deadline next week, but my teammates seem unmotivated. What should I do?"
+    }
+]
+
+
+# --- 2. Steered Generation Helper Function ---
+# (This is a slightly modified version of your interactive_steer function)
+def generate_steered_response(prompt: str, vectors: dict, layer_idx: int, strength: float):
+    """Generates a response using a specific steering vector, layer, and strength."""
+    hook_handle = None
+    if layer_idx not in vectors:
+        return f"[ERROR: Layer {layer_idx} not found in the provided vector file.]"
+        
+    steering_vector = vectors[layer_idx].to(model.device)
+        
+    try:
+        # A strength of 0 means no hook is needed
+        if strength != 0.0:
+            def steering_hook(module, input, output):
+                return output + steering_vector.to(output.dtype) * strength
+            target_module = model.model.layers[layer_idx].post_attention_layernorm
+            hook_handle = target_module.register_forward_hook(steering_hook)
+
+
+        chat = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        attention_mask = torch.ones_like(input_ids)
+
+
+        output_ids = model.generate(
+            input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=120,
+            do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=tokenizer.eos_token_id
+        )
+        return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+    finally:
+        if hook_handle: hook_handle.remove()
+
+
+# --- 3. Main Verification Loop ---
+# Set a seed for reproducible random generations during this test
+torch.manual_seed(42)
+
+
+for config in FINAL_CONFIGURATIONS:
+    trait = config['trait']
+    layer = config['layer']
+    strength = config['strength']
+
+
+    print("\n\n" + "#"*80)
+    print(f"#" + " "*25 + f"VERIFYING: {trait.upper()}")
+    print(f"#" + " "*21 + f"(Layer: {layer}, Positive Strength: {strength}, Negative Strength: {-strength})")
+    print("#"*80)
+
+
+    # Load the required steering vector file
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path):
+        print(f"\n⚠️ SKIPPING: Vector file not found for '{trait}' at {vector_path}")
+        continue
+    
+    # Use weights_only=True for security and to suppress warnings
+    persona_vectors = torch.load(vector_path, weights_only=True, map_location='cpu')
+
+
+    for item in TEST_PROMPTS:
+        print("\n" + "="*80)
+        print(f"PROMPT TYPE: {item['name']}")
+        print(f"PROMPT: \"{item['prompt']}\"")
+        print("="*80)
+        
+        # Generate all three versions
+        baseline_resp = generate_steered_response(item['prompt'], persona_vectors, layer, 0.0)
+        positive_resp = generate_steered_response(item['prompt'], persona_vectors, layer, strength)
+        negative_resp = generate_steered_response(item['prompt'], persona_vectors, layer, -strength)
+        
+        # Print formatted results
+        print("\n--- BASELINE (Strength 0.0) ---")
+        print(textwrap.fill(baseline_resp, width=80))
+        
+        print(f"\n--- POSITIVE STEER (+{strength}) | High {trait.title()} ---")
+        print(textwrap.fill(positive_resp, width=80))
+
+
+        print(f"\n--- NEGATIVE STEER (-{strength}) | Low {trait.title()} ---")
+        print(textwrap.fill(negative_resp, width=80))
+        
+print("\n\n--- Manual Verification Complete ---")
+# ==============================================================================
+#      DEFINITIVE MULTI-RUN STATISTICAL VALIDATION (FINAL, CORRECTED)
+#
+# This self-contained cell performs the most rigorous validation possible by
+# running the full 200-sample generation process multiple times (as requested).
+# This accounts for the stochastic nature of the model and provides the most
+# trustworthy statistics on performance and consistency.
+#
+# NOTE: This is a very computationally expensive process.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+import numpy as np
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from tqdm.auto import tqdm
+from statsmodels.stats.contingency_tables import mcnemar
+import warnings
+
+
+warnings.filterwarnings("ignore", message=".*weights_only=False.*")
+
+
+# --- 1. Core Configuration & Setup ---
+print("--- Initializing Configuration for Multi-Run Statistical Validation ---")
+
+
+FINAL_CONFIGURATIONS = [
+    {'trait': 'extraversion',      'layer': 15, 'strength': 200.0},
+    {'trait': 'agreeableness',     'layer': 10, 'strength': 100.0},
+    {'trait': 'neuroticism',       'layer': 15, 'strength': 200.0},
+    {'trait': 'openness',          'layer': 20, 'strength': 50.0},
+    {'trait': 'conscientiousness', 'layer': 15, 'strength': 250.0}
+]
+
+
+MODEL_NAME = "google/gemma-2-2b-it"
+TEST_CSV_PATH = "/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_test.csv"
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+FULL_SAMPLE_SIZE = 200
+N_RUNS = 3  # As requested, the number of full generation runs
+
+
+# --- 2. Load All Necessary Assets ---
+print("\n--- Loading All Necessary Assets ---")
+torch.set_grad_enabled(False)
+try:
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    personality_classifier = pipeline("text-classification", model="holistic-ai/personality_classifier", device=model.device)
+    gibberish_detector = pipeline("text-classification", model="madhurjindal/autonlp-Gibberish-Detector-492513457", device=model.device)
+    df_test_full = pd.read_csv(TEST_CSV_PATH)
+    print("✓ All assets loaded successfully.")
+except Exception as e:
+    raise RuntimeError(f"FATAL: Could not load assets. Error: {e}")
+
+
+# --- 3. Reusable Hook and Generation Function (Dynamo-Safe) ---
+g_steering_vector = None
+g_strength = 0.0
+
+
+def global_steering_hook(module, input, output):
+    if g_steering_vector is not None and g_strength != 0.0:
+        return output + g_steering_vector.to(output.dtype) * g_strength
+    return output
+
+
+def generate_with_global_hook(prompt: str):
+    chat = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+    attention_mask = torch.ones_like(input_ids)
+    # Generate with a different seed each time to ensure variability
+    output_ids = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+
+# --- 4. Main Validation Loop with Full Re-runs ---
+final_summary_results = []
+global g_steering_vector, g_strength
+
+
+for config in FINAL_CONFIGURATIONS:
+    trait, layer, strength = config['trait'], config['layer'], config['strength']
+    print("\n" + "#"*80); print(f"#" + " "*15 + f"STATISTICAL VALIDATION: {trait.upper()} at Layer {layer}, Strength {strength}"); print("#"*80)
+
+
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if not os.path.exists(vector_path): print(f"⚠️ SKIPPING: Vector file for '{trait}' not found."); continue
+    persona_vectors = torch.load(vector_path, weights_only=True, map_location=model.device)
+    if layer not in persona_vectors: print(f"⚠️ SKIPPING: Layer {layer} not found for '{trait}'."); continue
+    
+    prompts_df = df_test_full[df_test_full['trait_dimension'] == trait].drop_duplicates('question').head(FULL_SAMPLE_SIZE)
+    if len(prompts_df) < FULL_SAMPLE_SIZE: print(f"NOTE: Found only {len(prompts_df)} unique prompts for '{trait}'.")
+
+
+    # --- Multi-Run Loop ---
+    run_results = {'baseline_acc': [], 'steered_acc': [], 'cleanliness': []}
+    all_paired_outcomes = [] # To store (baseline_correct, steered_correct) for p-value
+
+
+    for run_num in range(N_RUNS):
+        print(f"\n--- Starting Generation Run {run_num + 1} / {N_RUNS} ---")
+        baseline_hits, steered_hits, steered_clean_count = 0, 0, 0
+        
+        target_module = model.model.layers[layer].post_attention_layernorm
+        hook_handle = target_module.register_forward_hook(global_steering_hook)
+        
+        try:
+            for prompt in tqdm(prompts_df['question'], desc=f"Run {run_num+1} ({trait.title()})"):
+                # Baseline
+                g_steering_vector, g_strength = persona_vectors[layer], 0.0
+                base_resp = generate_with_global_hook(prompt)
+                base_correct = personality_classifier(base_resp, truncation=True)[0]['label'] == trait if base_resp else False
+                if base_correct: baseline_hits += 1
+                
+                # Steered
+                g_steering_vector, g_strength = persona_vectors[layer], strength
+                steered_resp = generate_with_global_hook(prompt)
+                steered_correct = personality_classifier(steered_resp, truncation=True)[0]['label'] == trait if steered_resp else False
+                if steered_correct: steered_hits += 1
+                if gibberish_detector(steered_resp, truncation=True)[0]['label'] == 'clean' if steered_resp else False: steered_clean_count += 1
+                
+                # For p-value, we only need the first run's paired outcomes
+                if run_num == 0:
+                    all_paired_outcomes.append((base_correct, steered_correct))
+
+
+        finally:
+            hook_handle.remove()
+            g_steering_vector, g_strength = None, 0.0
+            
+        # Store the accuracy for this run
+        num_prompts = len(prompts_df)
+        run_results['baseline_acc'].append(baseline_hits / num_prompts)
+        run_results['steered_acc'].append(steered_hits / num_prompts)
+        run_results['cleanliness'].append(steered_clean_count / num_prompts)
+        print(f"--- Run {run_num + 1} Complete ---")
+        print(f"  Baseline Acc: {run_results['baseline_acc'][-1]:.1%}, Steered Acc: {run_results['steered_acc'][-1]:.1%}, Cleanliness: {run_results['cleanliness'][-1]:.1%}")
+
+
+    # --- Statistical Analysis Phase (from multiple runs) ---
+    # P-Value Calculation from the first full run
+    contingency_table = pd.crosstab(
+        pd.Series([p[0] for p in all_paired_outcomes], name='baseline'),
+        pd.Series([p[1] for p in all_paired_outcomes], name='steered')
+    ).reindex(index=[False, True], columns=[False, True], fill_value=0)
+    p_value = mcnemar(contingency_table, exact=True).pvalue
+
+
+    # Confidence Intervals from the multiple run results
+    def get_ci_str_from_runs(data):
+        if not data: return "N/A"
+        mean = np.mean(data)
+        if len(data) < 2: return f"{mean:.1%}" # Not enough data for CI
+        std_err = np.std(data) / np.sqrt(len(data))
+        ci_margin = 1.96 * std_err
+        return f"{mean:.1%} ({mean - ci_margin:.1%} - {mean + ci_margin:.1%})"
+
+
+    final_summary_results.append({
+        'Trait': trait.title(), 'Layer': layer, 'Strength': strength,
+        'Baseline Acc (95% CI)': get_ci_str_from_runs(run_results['baseline_acc']),
+        'Steered Acc (95% CI)': get_ci_str_from_runs(run_results['steered_acc']),
+        'Cleanliness (95% CI)': get_ci_str_from_runs(run_results['cleanliness']),
+        'P-Value': p_value
+    })
+
+
+# --- 5. Final Report ---
+print("\n\n" + "="*100); print(f" " * 30 + f"DEFINITIVE STATISTICAL VALIDATION REPORT"); print("="*100)
+if not final_summary_results:
+    print("No validation tests were completed.")
+else:
+    report_df = pd.DataFrame(final_summary_results).set_index('Trait')
+    report_df['P-Value'] = report_df['P-Value'].map('{:.4f}'.format)
+    report_df['Significant? (p < 0.05)'] = report_df['P-Value'].astype(float) < 0.05
+    print(report_df.to_string())
+print("\n--- Validation Complete ---")
+# ==============================================================================
+#                 DIAGNOSTIC ANALYSIS FOR 'OPENNESS' VECTOR
+#
+# This script runs a targeted test on the 'openness' vector to determine
+# which personality traits its steered responses are being misclassified as.
+# The results will inform our orthogonalization strategy.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from tqdm.auto import tqdm
+import warnings
+from collections import Counter
+
+
+warnings.filterwarnings("ignore", message=".*weights_only=False.*")
+
+
+# --- 1. Configuration ---
+print("--- Initializing Diagnostic for 'Openness' Vector ---")
+TRAIT_TO_DIAGNOSE = 'openness'
+CONFIG = {'trait': 'openness', 'layer': 20, 'strength': 50.0}
+FULL_SAMPLE_SIZE = 100
+
+
+# --- 2. Load Necessary Assets (if not already loaded) ---
+try:
+    _ = model, tokenizer, personality_classifier, df_test_full, VECTORS_CACHE_DIR
+    print("✓ All assets appear to be loaded.")
+except NameError:
+    print("ERROR: Prerequisite assets not found. Please run a previous validation cell first.")
+    raise
+
+
+# --- 3. Steered Generation Helper Function (re-defined for self-containment) ---
+g_steering_vector, g_strength = None, 0.0
+def global_steering_hook(module, input, output):
+    if g_steering_vector is not None and g_strength != 0.0: return output + g_steering_vector.to(output.dtype) * g_strength
+    return output
+def generate_with_global_hook(prompt: str):
+    chat = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+    attention_mask = torch.ones_like(input_ids)
+    output_ids = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+
+# --- 4. Run the Diagnostic Loop ---
+global g_steering_vector, g_strength
+layer, strength = CONFIG['layer'], CONFIG['strength']
+
+
+print(f"\nRunning diagnostic on {FULL_SAMPLE_SIZE} prompts for '{TRAIT_TO_DIAGNOSE}'...")
+
+
+vector_path = os.path.join(VECTORS_CACHE_DIR, f"{TRAIT_TO_DIAGNOSE}_{MODEL_NAME.split('/')[-1]}.pt")
+if not os.path.exists(vector_path): raise FileNotFoundError(f"Vector file not found for '{TRAIT_TO_DIAGNOSE}'")
+persona_vectors = torch.load(vector_path, weights_only=True, map_location=model.device)
+
+
+prompts_df = df_test_full[df_test_full['trait_dimension'] == TRAIT_TO_DIAGNOSE].drop_duplicates('question').head(FULL_SAMPLE_SIZE)
+
+
+baseline_predictions = []
+steered_predictions = []
+
+
+target_module = model.model.layers[layer].post_attention_layernorm
+hook_handle = target_module.register_forward_hook(global_steering_hook)
+
+
+try:
+    for prompt in tqdm(prompts_df['question'], desc=f"Diagnosing {TRAIT_TO_DIAGNOSE.title()}"):
+        # Baseline
+        g_steering_vector, g_strength = persona_vectors[layer], 0.0
+        base_resp = generate_with_global_hook(prompt)
+        if base_resp: baseline_predictions.append(personality_classifier(base_resp, truncation=True)[0]['label'])
+
+
+        # Steered
+        g_steering_vector, g_strength = persona_vectors[layer], strength
+        steered_resp = generate_with_global_hook(prompt)
+        if steered_resp: steered_predictions.append(personality_classifier(steered_resp, truncation=True)[0]['label'])
+finally:
+    hook_handle.remove()
+    g_steering_vector, g_strength = None, 0.0
+
+
+# --- 5. Analyze and Report the Prediction Distribution ---
+print("\n" + "="*80)
+print(f" " * 22 + f"DIAGNOSTIC REPORT FOR 'OPENNESS' VECTOR")
+print("="*80)
+
+
+baseline_counts = Counter(baseline_predictions)
+steered_counts = Counter(steered_predictions)
+
+
+report_data = []
+all_traits = sorted(list(set(baseline_counts.keys()) | set(steered_counts.keys())))
+
+
+for trait_label in all_traits:
+    report_data.append({
+        'Predicted Trait': trait_label.title(),
+        'Baseline Count': baseline_counts.get(trait_label, 0),
+        'Steered Count': steered_counts.get(trait_label, 0)
+    })
+
+
+report_df = pd.DataFrame(report_data).set_index('Predicted Trait')
+report_df['Change'] = report_df['Steered Count'] - report_df['Baseline Count']
+report_df = report_df.sort_values(by='Steered Count', ascending=False)
+
+
+print("How the personality classifier labeled the generated responses:\n")
+print(report_df.to_string())
+print("\n" + "="*80)
+
+
+# Identify the main contaminant
+report_df_no_openness = report_df.drop('Openness', errors='ignore')
+if not report_df_no_openness.empty:
+    main_contaminant = report_df_no_openness['Steered Count'].idxmax()
+    print(f"\n💡 INSIGHT: The primary 'contaminant' trait appears to be '{main_contaminant}'.")
+    print(f"   This suggests we should orthogonalize the 'Openness' vector against the '{main_contaminant}' vector.")
+else:
+    print("\n💡 INSIGHT: The model almost exclusively produced 'Openness' responses.")
+
+
+print("\n--- Diagnostic Complete ---")
+# ==============================================================================
+#                 PURIFICATION OF THE 'OPENNESS' VECTOR
+#
+# This script uses the insights from the diagnostic report to purify the
+# 'openness' vector. It removes the components of the primary contaminant
+# traits ('conscientiousness' and 'extraversion') using symmetric
+# orthogonal projection.
+# ==============================================================================
+
+
+import torch
+import os
+
+
+# --- 1. Configuration ---
+TRAIT_TO_PURIFY = 'openness'
+CONTAMINANT_TRAITS = ['conscientiousness', 'extraversion'] # Based on the diagnostic report
+
+
+# Ensure necessary variables are defined
+try:
+    _ = MODEL_NAME, VECTORS_CACHE_DIR
+except NameError:
+    MODEL_NAME = "google/gemma-2-2b-it"
+    VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+    print("WARNING: Using default MODEL_NAME and VECTORS_CACHE_DIR.")
+
+
+# --- 2. Load the Necessary Vectors ---
+print("--- Loading vectors for purification ---")
+vectors_to_load = [TRAIT_TO_PURIFY] + CONTAMINANT_TRAITS
+loaded_vectors = {}
+for trait in vectors_to_load:
+    vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_{MODEL_NAME.split('/')[-1]}.pt")
+    if os.path.exists(vector_path):
+        loaded_vectors[trait] = torch.load(vector_path, weights_only=True)
+        print(f"✓ Loaded '{trait}' vectors.")
+    else:
+        raise FileNotFoundError(f"FATAL: Vector file for trait '{trait}' not found. Please ensure all vectors are generated.")
+
+
+# --- 3. The Purification Function (Symmetric Orthogonal Projection) ---
+def purify_vector(target_vector_dict, contaminant_vector_dicts):
+    """
+    Purifies a target vector against one or more contaminant vectors for each layer.
+    """
+    purified_vectors = {}
+    layers = target_vector_dict.keys()
+    
+    for layer in layers:
+        v_target = target_vector_dict[layer].to(dtype=torch.float32)
+        
+        # Create a matrix from the contaminant vectors for this layer
+        contaminant_vectors = [d[layer].to(dtype=torch.float32) for d in contaminant_vector_dicts]
+        contaminant_matrix = torch.stack(contaminant_vectors, dim=1)
+        
+        # Find an orthogonal basis for the contaminant subspace using QR decomposition
+        Q, _ = torch.linalg.qr(contaminant_matrix)
+        
+        # Project v_target onto the contaminant subspace
+        projection_on_subspace = torch.zeros_like(v_target)
+        for i in range(Q.shape[1]):
+            basis_vector = Q[:, i]
+            projection_on_subspace += torch.dot(v_target, basis_vector) * basis_vector
+            
+        # The purified vector is the original vector minus its projection
+        v_purified = v_target - projection_on_subspace
+        
+        # Normalize and store the final vector
+        purified_vectors[layer] = (v_purified / torch.norm(v_purified)).to(dtype=torch.bfloat16)
+        
+    return purified_vectors
+
+
+# --- 4. Execute Purification and Save the New Vector ---
+print(f"\n--- Purifying '{TRAIT_TO_PURIFY}' against {CONTAMINANT_TRAITS} ---")
+
+
+target_vector_dict = loaded_vectors[TRAIT_TO_PURIFY]
+contaminant_dicts = [loaded_vectors[t] for t in CONTAMINANT_TRAITS]
+
+
+# Generate the new, purified vectors
+openness_purified_vectors = purify_vector(target_vector_dict, contaminant_dicts)
+
+
+# Save the new vector file with a distinct name
+purified_save_path = os.path.join(VECTORS_CACHE_DIR, f"{TRAIT_TO_PURIFY}_purified_{MODEL_NAME.split('/')[-1]}.pt")
+torch.save(openness_purified_vectors, purified_save_path)
+
+
+print(f"\n✓ Purification complete!")
+print(f"   New purified vector file saved to: {purified_save_path}")
+print("\n--- NEXT STEP ---")
+print("You should now re-run the statistical validation, but for 'openness',")
+print("load this new purified vector file and test it at the same layer and strength (Layer 20, Strength 50.0).")
+# ==============================================================================
+#      VALIDATION OF THE PURIFIED 'OPENNESS' VECTOR (FINAL EXPERIMENT)
+#
+# This self-contained cell runs the definitive multi-run statistical validation
+# exclusively on the new, purified 'openness' vector to determine if the
+# orthogonalization process was successful.
+# ==============================================================================
+
+
+import torch
+import os
+import pandas as pd
+import numpy as np
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from tqdm.auto import tqdm
+from statsmodels.stats.contingency_tables import mcnemar
+import warnings
+
+
+warnings.filterwarnings("ignore", message=".*weights_only=False.*")
+
+
+# --- 1. Core Configuration & Setup ---
+print("--- Initializing Final Validation for Purified 'Openness' Vector ---")
+
+
+# We are testing ONLY the purified openness vector with its original optimal parameters
+CONFIG = {'trait': 'openness', 'layer': 20, 'strength': 50.0}
+
+
+MODEL_NAME = "google/gemma-2-2b-it"
+TEST_CSV_PATH = "/cs/student/projects3/aisd/2024/ghanda/personality_contrastive_data_test.csv"
+VECTORS_CACHE_DIR = "persona_vectors_cache_big_five"
+FULL_SAMPLE_SIZE = 200
+N_RUNS = 3
+
+
+# --- 2. Load All Necessary Assets ---
+print("\n--- Loading All Necessary Assets ---")
+torch.set_grad_enabled(False)
+try:
+    _ = model, tokenizer, personality_classifier, gibberish_detector, df_test_full
+    print("✓ All assets appear to be loaded.")
+except NameError:
+    print("Assets not found, loading them now...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    personality_classifier = pipeline("text-classification", model="holistic-ai/personality_classifier", device=model.device)
+    gibberish_detector = pipeline("text-classification", model="madhurjindal/autonlp-Gibberish-Detector-492513457", device=model.device)
+    df_test_full = pd.read_csv(TEST_CSV_PATH)
+    print("✓ All assets loaded successfully.")
+
+
+# --- 3. Reusable Hook and Generation Function ---
+g_steering_vector, g_strength = None, 0.0
+def global_steering_hook(module, input, output):
+    if g_steering_vector is not None and g_strength != 0.0: return output + g_steering_vector.to(output.dtype) * g_strength
+    return output
+def generate_with_global_hook(prompt: str):
+    chat = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt").to(model.device)
+    attention_mask = torch.ones_like(input_ids)
+    output_ids = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+
+# --- 4. Main Validation Loop ---
+trait, layer, strength = CONFIG['trait'], CONFIG['layer'], CONFIG['strength']
+print("\n" + "#"*80); print(f"#" + " "*15 + f"VALIDATING PURIFIED: {trait.upper()} at Layer {layer}, Strength {strength}"); print("#"*80)
+
+
+# --- CRITICAL CHANGE: Load the PURIFIED vector file ---
+vector_path = os.path.join(VECTORS_CACHE_DIR, f"{trait}_purified_{MODEL_NAME.split('/')[-1]}.pt")
+print(f"-> Loading PURIFIED vector from: {vector_path}")
+if not os.path.exists(vector_path): raise FileNotFoundError(f"Purified vector file not found. Please run the purification script first.")
+persona_vectors = torch.load(vector_path, weights_only=True, map_location=model.device)
+if layer not in persona_vectors: raise KeyError(f"Layer {layer} not found in purified vector file.")
+steering_vector = persona_vectors[layer]
+
+
+prompts_df = df_test_full[df_test_full['trait_dimension'] == trait].drop_duplicates('question').head(FULL_SAMPLE_SIZE)
+if len(prompts_df) < FULL_SAMPLE_SIZE: print(f"NOTE: Found only {len(prompts_df)} unique prompts for '{trait}'.")
+
+
+run_results = {'baseline_acc': [], 'steered_acc': [], 'cleanliness': []}
+all_paired_outcomes = []
+
+
+for run_num in range(N_RUNS):
+    print(f"\n--- Starting Generation Run {run_num + 1} / {N_RUNS} ---")
+    baseline_hits, steered_hits, steered_clean_count = 0, 0, 0
+    target_module = model.model.layers[layer].post_attention_layernorm
+    hook_handle = target_module.register_forward_hook(global_steering_hook)
+    try:
+        for prompt in tqdm(prompts_df['question'], desc=f"Run {run_num+1} ({trait.title()})"):
+            g_steering_vector, g_strength = steering_vector, 0.0
+            base_resp = generate_with_global_hook(prompt)
+            base_correct = personality_classifier(base_resp, truncation=True)[0]['label'] == trait if base_resp else False
+            if base_correct: baseline_hits += 1
+            
+            g_steering_vector, g_strength = steering_vector, strength
+            steered_resp = generate_with_global_hook(prompt)
+            steered_correct = personality_classifier(steered_resp, truncation=True)[0]['label'] == trait if steered_resp else False
+            if steered_correct: steered_hits += 1
+            if gibberish_detector(steered_resp, truncation=True)[0]['label'] == 'clean' if steered_resp else False: steered_clean_count += 1
+            
+            if run_num == 0: all_paired_outcomes.append((base_correct, steered_correct))
+    finally:
+        hook_handle.remove()
+        g_steering_vector, g_strength = None, 0.0
+        
+    num_prompts = len(prompts_df)
+    run_results['baseline_acc'].append(baseline_hits / num_prompts)
+    run_results['steered_acc'].append(steered_hits / num_prompts)
+    run_results['cleanliness'].append(steered_clean_count / num_prompts)
+    print(f"--- Run {run_num + 1} Complete ---")
+    print(f"  Baseline Acc: {run_results['baseline_acc'][-1]:.1%}, Steered Acc: {run_results['steered_acc'][-1]:.1%}, Cleanliness: {run_results['cleanliness'][-1]:.1%}")
+
+
+# --- 5. Final Report ---
+print("\n\n" + "="*100); print(f" " * 25 + f"STATISTICAL REPORT FOR PURIFIED 'OPENNESS'"); print("="*100)
+
+
+contingency_table = pd.crosstab(pd.Series([p[0] for p in all_paired_outcomes]), pd.Series([p[1] for p in all_paired_outcomes])).reindex(index=[False, True], columns=[False, True], fill_value=0)
+p_value = mcnemar(contingency_table, exact=True).pvalue
+
+
+def get_ci_str_from_runs(data):
+    mean = np.mean(data)
+    if len(data) < 2: return f"{mean:.1%}"
+    std_err = np.std(data) / np.sqrt(len(data))
+    ci_margin = 1.96 * std_err
+    return f"{mean:.1%} ({mean - ci_margin:.1%} - {mean + ci_margin:.1%})"
+
+
+report_data = {
+    'Trait': trait.title(), 'Layer': layer, 'Strength': strength,
+    'Baseline Acc (95% CI)': get_ci_str_from_runs(run_results['baseline_acc']),
+    'Steered Acc (95% CI)': get_ci_str_from_runs(run_results['steered_acc']),
+    'Cleanliness (95% CI)': get_ci_str_from_runs(run_results['cleanliness']),
+    'P-Value': p_value,
+    'Significant? (p < 0.05)': p_value < 0.05
+}
+report_df = pd.DataFrame([report_data]).set_index('Trait')
+report_df['P-Value'] = report_df['P-Value'].map('{:.4f}'.format)
+print(report_df.to_string())
+print("\n--- Final Validation Complete ---")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# evaluate_generate.py
+import os
+import torch
+import pandas as pd
+import numpy as np
+import argparse
+from functools import partial
+from tqdm.auto import tqdm
+
+
+from datasets import load_dataset, Dataset
+from transformers import (
+   AutoModelForCausalLM,
+   AutoTokenizer,
+   BitsAndBytesConfig,
+   logging,
+)
+from peft import PeftModel
+from dotenv import load_dotenv
+
+
+# --- All setup code (Sections 0, 1, 2) is the same. I've collapsed it for brevity. ---
+# ... (Paste the full Sections 0, 1, and 2 from the previous script here) ...
+# ==============================================================================
+# 0. ROBUST ENVIRONMENT & CACHE SETUP
+# ==============================================================================
+def setup_environment():
+   """Loads environment variables from .env and sets up cache directories."""
+   from dotenv import load_dotenv
+   print("--- Setting up environment ---")
+   load_dotenv()
+   hf_home, tmp_dir = os.getenv("HF_HOME"), os.getenv("TMPDIR")
+   if not hf_home or not tmp_dir: raise ValueError("FATAL: HF_HOME and TMPDIR must be set in your .env file.")
+   os.environ.update({
+       "HF_HOME": hf_home, "HUGGINGFACE_HUB_CACHE": os.path.join(hf_home, "hub"),
+       "TRANSFORMERS_CACHE": os.path.join(hf_home, "models"), "HF_DATASETS_CACHE": os.path.join(hf_home, "datasets"),
+       "TMPDIR": tmp_dir, "HF_HUB_DISABLE_XET_STORAGE": "1",
+   })
+   for path in [os.path.join(hf_home, "hub"), os.path.join(hf_home, "models"), os.path.join(hf_home, "datasets"), tmp_dir]:
+       os.makedirs(path, exist_ok=True)
+   print(f"HF_HOME set to: {os.getenv('HF_HOME')}")
+   print("Environment setup complete.")
+
+
+setup_environment()
+
+
+# ==============================================================================
+# 1. CENTRAL CONFIGURATION & SETUP
+# ==============================================================================
+load_dotenv()
+RANDOM_SEED = 42
+N_SAMPLES_MMLU, N_SAMPLES_GAIA, N_SAMPLES_BBQ = 50, 50, 50
+TARGET_PERSONALITIES = ["extraversion", "agreeableness", "neuroticism", "openness", "conscientiousness"]
+STRATEGIC_MMLU_SUBJECTS = ["high_school_psychology", "abstract_algebra", "college_physics", "high_school_us_history", "logical_fallacies", "professional_law", "moral_scenarios"]
+BBQ_CATEGORIES = ["Age", "Disability_status", "Gender_identity", "Nationality", "Physical_appearance", "Race_ethnicity", "Race_x_SES", "Race_x_gender", "Religion", "SES", "Sexual_orientation"]
+bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
+device_map = {"": 0}
+BATCH_SIZE = 8
+
+
+CONFIGS = {
+   "gemma2": {
+       "model_id": "google/gemma-2-2b-it",
+       "peft": {"adapter_dir": "peft_gemma2_personality"},
+       "steering": {
+           "vector_dir": "persona_vectors_cache_big_five",
+           "filename_overrides": {"openness": "openness_v3_combined_gemma-2-2b-it.pt"},
+           "settings": {
+               "extraversion":      {"layer": 15, "strength": 200.0}, "agreeableness":     {"layer": 10, "strength": 100.0},
+               "neuroticism":       {"layer": 15,  "strength": 200.0},"openness":          {"layer": 15, "strength": 110.0},
+               "conscientiousness": {"layer": 15, "strength": 250.0},
+           }
+       },
+       "prompting": {"persona_template": "You are an expert assistant who embodies the personality trait of {personality}. Your task is to solve the following problem."}
+   },
+   "llama3": {
+       "model_id": "meta-llama/Meta-Llama-3-8B-Instruct",
+       "peft": {"adapter_dir": "peft_llama3_final"},
+       "steering": {
+           "vector_dir": "persona_vectors_cache_big_five",
+           "filename_overrides": {},
+           "settings": {
+               # You MUST fill in your actual calibrated Llama-3 values here
+           }
+       },
+       "prompting": {"persona_template": "You are an expert assistant who embodies the personality trait of {personality}. Your task is to solve the following problem."}
+   }
+}
+
+
+# ==============================================================================
+# 2. PROMPT HELPER
+# ==============================================================================
+def create_benchmark_prompt(question, choices, benchmark_type, tokenizer, method_config=None):
+   method_config = method_config or {}
+   instruction_header = "You are an expert assistant. Your task is to solve the following problem."
+   if method_config.get("method") == "prompting" and method_config.get("personality") != "Baseline":
+       template = method_config.get("persona_template", instruction_header)
+       instruction_header = template.format(personality=method_config.get("personality"))
+   instruction_body = ("First, you must reason through the problem step-by-step in a deliberate manner. After your reasoning, you MUST conclude with the final answer on a new line in the specified format.")
+   instruction_header = f"{instruction_header}\n{instruction_body}"
+   if benchmark_type == "MMLU": choice_str, final_fmt = "\n".join([f"({chr(65+i)}) {c}" for i, c in enumerate(choices)]), "Final Answer: <LETTER>"
+   elif benchmark_type == "BBQ": choice_str, final_fmt = "\n".join([f"({i}) {c}" for i, c in enumerate(choices)]), "Final Answer: <INDEX>"
+   else: choice_str, final_fmt = "", "Final Answer: <ANSWER>"
+   task_content = f"{question}\n\n{choice_str}\n\nInstructions:\n1. Reason step-by-step.\n2. Conclude with the answer in the format: {final_fmt}"
+   full_user_prompt = f"{instruction_header}\n\n---\n\n{task_content}"
+   messages = [{"role": "user", "content": full_user_prompt}]
+   return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+
+# ==============================================================================
+# 3. CORE GENERATION & BENCHMARK RUNNERS (GENERATE ONLY)
+# ==============================================================================
+def generate_batched_responses(model, tokenizer, prompts, max_new_tokens=512, method_config=None):
+   """
+   FIXED: Generates responses for a list of prompts in a single batch.
+   This version ensures the steering vector is moved to the correct GPU device.
+   """
+   method_config = method_config or {}
+   hook_handle = None
+   try:
+       method, personality = method_config.get("method"), method_config.get("personality")
+       if method == "steering" and personality != "Baseline":
+           settings, vectors = method_config.get("settings", {}), method_config.get("vectors", {})
+           if personality in settings and personality in vectors:
+               steer_layer, steer_strength = settings[personality]["layer"], settings[personality]["strength"]
+               steer_vector = vectors[personality].get(steer_layer)
+              
+               if steer_vector is not None:
+                   # THE FIX IS HERE:
+                   # Explicitly move the steering vector to the same device as the model.
+                   gpu_steer_vector = steer_vector.to(model.device)
+
+
+                   def hook(module, input, output):
+                       # Now, both 'output' and 'gpu_steer_vector' are on the same GPU device.
+                       return output + gpu_steer_vector.to(output.dtype) * steer_strength
+                  
+                   target_module = model.model.layers[steer_layer].post_attention_layernorm
+                   hook_handle = target_module.register_forward_hook(hook)
+
+
+       # Tokenize the entire batch of prompts, padding to the length of the longest.
+       inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+      
+       generation_params = {'do_sample': True, 'temperature': 0.6, 'top_p': 0.9, 'max_new_tokens': max_new_tokens, 'pad_token_id': tokenizer.eos_token_id}
+       with torch.no_grad():
+           outputs = model.generate(**inputs, **generation_params)
+      
+       # Manually decode and strip prompts
+       responses = []
+       # Find the length of the prompt in tokens for each item in the batch
+       prompt_lengths = inputs['input_ids'].shape[1]
+       for i in range(len(prompts)):
+           # Slice the output tensor to get only the generated tokens
+           response_ids = outputs[i][prompt_lengths:]
+           responses.append(tokenizer.decode(response_ids, skip_special_tokens=True).strip())
+       return responses
+   finally:
+       if hook_handle: hook_handle.remove()
+
+
+def run_generation_for_benchmark(benchmark_name, dataset, model, tokenizer, method_config):
+   """Generates responses for a dataset and returns them along with original items."""
+   prompts = []
+   if benchmark_name == "MMLU":
+       for item in dataset: prompts.append(create_benchmark_prompt(item['question'], item['choices'], "MMLU", tokenizer, method_config))
+   elif benchmark_name == "GAIA":
+       for item in dataset:
+           prompt_text = item['Question'] + (f"\n\n--- Document ---\n{item['file_content']}" if item.get('file_content') else "")
+           prompts.append(create_benchmark_prompt(prompt_text, [], "GAIA", tokenizer, method_config))
+   elif benchmark_name == "BBQ":
+       for item in dataset: prompts.append(create_benchmark_prompt(f"{item['context']}\n{item['question']}", [item['ans0'], item['ans1'], item['ans2']], "BBQ", tokenizer, method_config))
+
+
+   all_responses = []
+   max_tokens = 256 if benchmark_name == "BBQ" else 512
+   for i in tqdm(range(0, len(prompts), BATCH_SIZE), desc=f"    Generating for {benchmark_name[:10]:<10}"):
+       batch_prompts = prompts[i:i + BATCH_SIZE]
+       responses = generate_batched_responses(model, tokenizer, batch_prompts, max_tokens, method_config)
+       all_responses.extend(responses)
+
+
+   # Combine original data with new responses
+   output_data = []
+   for i, item in enumerate(dataset):
+       record = dict(item) # Copy original item
+       record['model_response'] = all_responses[i]
+       output_data.append(record)
+   return output_data
+
+
+# ==============================================================================
+# 4. MAIN ORCHESTRATION SCRIPT (GENERATE & SAVE)
+# ==============================================================================
+def main(args):
+   global BATCH_SIZE
+   if args.batch_size: BATCH_SIZE = args.batch_size
+   print(f"--- Using Batch Size: {BATCH_SIZE} ---")
+  
+   logging.set_verbosity_error()
+   MODEL_CONFIG, METHOD_CONFIG = CONFIGS[args.model], CONFIGS[args.model][args.method]
+
+
+   print(f"\n--- Loading base model: {MODEL_CONFIG['model_id']} ---")
+   tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG['model_id'])
+   if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+   base_model = AutoModelForCausalLM.from_pretrained(MODEL_CONFIG['model_id'], quantization_config=bnb_config, device_map=device_map, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
+  
+   model_for_eval = base_model
+   if args.method == 'peft':
+       # ... (PEFT loading logic is unchanged) ...
+       print(f"--- Loading PEFT adapters from: {METHOD_CONFIG['adapter_dir']} ---")
+       peft_model, loaded = base_model, False
+       for trait in TARGET_PERSONALITIES:
+           adapter_path = os.path.join(METHOD_CONFIG['adapter_dir'], trait)
+           if not os.path.exists(adapter_path): print(f"Warning: PEFT Adapter for '{trait}' not found. Skipping."); continue
+           if not loaded: peft_model, loaded = PeftModel.from_pretrained(base_model, adapter_path, adapter_name=trait), True
+           else: peft_model.load_adapter(adapter_path, adapter_name=trait)
+           print(f"Loaded PEFT adapter: '{trait}'")
+       if not loaded: raise RuntimeError("FATAL: No PEFT adapters were found.")
+       model_for_eval = peft_model
+   elif args.method == 'steering':
+       # ... (Steering loading logic is unchanged) ...
+       print(f"--- Loading Steering vectors from: {METHOD_CONFIG['vector_dir']} ---")
+       vectors_by_trait, overrides = {}, METHOD_CONFIG.get("filename_overrides", {})
+       model_filename_id = MODEL_CONFIG['model_id'].split('/')[-1]
+       for trait in TARGET_PERSONALITIES:
+           filename = overrides[trait] if trait in overrides else f"{trait}_{model_filename_id}.pt"
+           vec_path = os.path.join(METHOD_CONFIG['vector_dir'], filename)
+           if os.path.exists(vec_path):
+               vectors_by_trait[trait] = torch.load(vec_path)
+               print(f"Loaded steering vector for '{trait}' from '{filename}'")
+           else: print(f"Warning: Steering vector for '{trait}' not found at '{vec_path}'. Skipping.")
+       METHOD_CONFIG["vectors"] = vectors_by_trait
+
+
+   # --- Load the correct benchmark dataset ---
+   print(f"\n--- Preparing benchmark: {args.benchmark.upper()} ---")
+   all_benchmark_data = []
+   if args.benchmark.upper() == "MMLU":
+       for subject in STRATEGIC_MMLU_SUBJECTS:
+           try:
+               ds = load_dataset("cais/mmlu", subject, split="test", trust_remote_code=True).shuffle(seed=RANDOM_SEED).select(range(N_SAMPLES_MMLU))
+               # Add metadata for later scoring
+               all_benchmark_data.extend([{'benchmark_type': 'MMLU', 'subject': subject, **item} for item in ds])
+           except Exception as e: print(f"    [Warning] Could not load MMLU '{subject}'. Skipping. Error: {e}")
+   elif args.benchmark.upper() == "GAIA":
+       try:
+           ds = load_dataset("gaia-benchmark/GAIA", "2023_level1", split="validation", trust_remote_code=True).shuffle(seed=RANDOM_SEED).select(range(N_SAMPLES_GAIA))
+           all_benchmark_data.extend([{'benchmark_type': 'GAIA', **item} for item in ds])
+       except Exception as e: print(f"    [Warning] Could not load GAIA. Skipping. Error: {e}")
+   elif args.benchmark.upper() == "BBQ":
+       for category in BBQ_CATEGORIES:
+           try:
+               ds = load_dataset("heegyu/bbq", category, split="test", trust_remote_code=True).filter(lambda x: x['ambiguous_or_disambiguated'] == 'ambiguous').shuffle(seed=RANDOM_SEED).select(range(N_SAMPLES_BBQ))
+               all_benchmark_data.extend([{'benchmark_type': 'BBQ', 'category': category, **item} for item in ds])
+           except Exception as e: print(f"    [Warning] Could not load BBQ '{category}'. Skipping. Error: {e}")
+
+
+   if not all_benchmark_data: print("FATAL: No benchmark data loaded. Exiting."); return
+   benchmark_dataset = Dataset.from_pandas(pd.DataFrame(all_benchmark_data))
+
+
+   # --- Run Generation Loop ---
+   full_raw_results = []
+   for personality in ["Baseline"] + TARGET_PERSONALITIES:
+       print(f"\n{'='*20} GENERATING FOR: {personality.upper()} on {args.benchmark.upper()} (Method: {args.method}) {'='*20}")
+       current_config = {"method": args.method, "personality": personality, **METHOD_CONFIG}
+       if args.method == 'peft' and personality != 'Baseline': model_for_eval.set_adapter(personality)
+      
+       # This function now returns data with responses, not scores
+       generated_data = run_generation_for_benchmark(args.benchmark.upper(), benchmark_dataset, model_for_eval, tokenizer, current_config)
+       for record in generated_data:
+           record['model_personality'] = personality # Add personality metadata
+       full_raw_results.extend(generated_data)
+
+
+   # --- Save Raw Results ---
+   output_filename = f"raw_outputs_{args.model}_{args.benchmark}_{args.method}.jsonl"
+   pd.DataFrame(full_raw_results).to_json(output_filename, orient='records', lines=True)
+   print(f"\n\n{'='*80}\n✅ Generation Complete!\nRaw outputs saved to '{output_filename}'\n{'='*80}")
+   print(f"Next step: run 'python evaluate_score.py {output_filename}'")
+
+
+
+
+if __name__ == "__main__":
+   parser = argparse.ArgumentParser(description="STAGE 1: Generate model outputs for benchmarks.")
+   parser.add_argument("--model", type=str, required=True, choices=["gemma2", "llama3"], help="The base model to evaluate.")
+   parser.add_argument("--benchmark", type=str, required=True, choices=["MMLU", "GAIA", "BBQ"], help="The benchmark to run.")
+   parser.add_argument("--method", type=str, required=True, choices=["peft", "steering", "prompting"], help="The method for applying personality.")
+   parser.add_argument("--batch_size", type=int, help="Override the default batch size for generation.")
+   args = parser.parse_args()
+   main(args)
+
+
+
+
+
+
+# evaluate_score.py
+import pandas as pd
+import numpy as np
+import argparse
+import os
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+from tqdm import tqdm
+
+
+# --- Load Config for Judge ---
+load_dotenv()
+AZURE_JUDGE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_JUDGE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AZURE_JUDGE_KEY = os.getenv("AZURE_OPENAI_SUBSCRIPTION_KEY")
+AZURE_JUDGE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+TARGET_PERSONALITIES = ["extraversion", "agreeableness", "neuroticism", "openness", "conscientiousness"]
+
+
+class AzureOAIJudge:
+   def __init__(self, endpoint, deployment, api_key, api_version):
+       if not all([endpoint, deployment, api_key, api_version]): raise ValueError("Azure Judge credentials not configured.")
+       self.client = AzureOpenAI(api_version=api_version, azure_endpoint=endpoint, api_key=api_key)
+       self.deployment = deployment
+   def _call_judge(self, sys_prompt, usr_prompt):
+       try:
+           r = self.client.chat.completions.create(model=self.deployment, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": usr_prompt}], temperature=0.0, max_tokens=5)
+           return r.choices[0].message.content.strip()
+       except Exception as e: return f"JUDGE_ERROR: {e}"
+   def extract_mcq_letter(self, text): return self._call_judge("Find 'Final Answer: <LETTER>' and return ONLY the letter. If not found, return X.", text)
+   def extract_bbq_index(self, text): return self._call_judge("Find 'Final Answer: <INDEX>' and return ONLY the integer. If not found, return -1.", text)
+
+
+def score_results(df: pd.DataFrame, judge: AzureOAIJudge):
+   """Adds a 'is_correct' column to the dataframe by judging responses."""
+   scores = []
+   for _, row in tqdm(df.iterrows(), total=len(df), desc="Scoring with API Judge"):
+       is_correct = False
+       if row['benchmark_type'] == "MMLU":
+           is_correct = judge.extract_mcq_letter(row['model_response']) == chr(65 + row['answer'])
+       elif row['benchmark_type'] == "GAIA":
+           is_correct = str(row['Final answer']).lower() in str(row['model_response']).lower()
+       elif row['benchmark_type'] == "BBQ":
+           try:
+               chosen_idx = int(judge.extract_bbq_index(row['model_response']))
+               if chosen_idx in [0, 1, 2]:
+                   is_correct = (chosen_idx == row['target_loc'])
+           except (ValueError, TypeError): pass
+       scores.append(is_correct)
+   df['is_correct'] = scores
+   return df
+
+
+def main(args):
+   print(f"--- Loading raw outputs from: {args.input_file} ---")
+   df_raw = pd.read_json(args.input_file, lines=True)
+
+
+   print("--- Initializing Azure OpenAI Judge ---")
+   judge = AzureOAIJudge(AZURE_JUDGE_ENDPOINT, AZURE_JUDGE_DEPLOYMENT, AZURE_JUDGE_KEY, AZURE_JUDGE_API_VERSION)
+
+
+   print("--- Scoring all model responses. This may take a while... ---")
+   df_scored = score_results(df_raw, judge)
+
+
+   # --- Aggregate and Pivot Results ---
+   print("\n--- Aggregating final results ---")
+  
+   # Determine the grouping keys and metric names from the data
+   benchmark_type = df_scored['benchmark_type'].iloc[0]
+   if benchmark_type == 'MMLU':
+       group_keys = ['subject']
+       metric_prefix = 'Accuracy'
+       avg_metric_name = 'Accuracy_Avg'
+   elif benchmark_type == 'BBQ':
+       group_keys = ['category']
+       metric_prefix = 'Bias_Score'
+       avg_metric_name = 'Bias_Score_Avg'
+   else: # GAIA
+       group_keys = []
+       metric_prefix = 'Accuracy'
+       avg_metric_name = 'Accuracy'
+      
+   # Calculate scores for each subgroup (e.g., each MMLU subject)
+   if group_keys:
+       agg_df = df_scored.groupby(['model_personality'] + group_keys)['is_correct'].mean().reset_index()
+       agg_df['metric'] = metric_prefix + "_" + agg_df[group_keys[0]]
+       agg_df = agg_df.rename(columns={'is_correct': 'score', 'model_personality': 'model'})
+   else: # Handle GAIA which has no subgroups
+       agg_df = df_scored.groupby('model_personality')['is_correct'].mean().reset_index()
+       agg_df['metric'] = metric_prefix
+       agg_df = agg_df.rename(columns={'is_correct': 'score', 'model_personality': 'model'})
+
+
+
+
+   # Calculate the overall average score
+   avg_scores = df_scored.groupby('model_personality')['is_correct'].mean().reset_index()
+   avg_scores['metric'] = avg_metric_name
+   avg_scores = avg_scores.rename(columns={'is_correct': 'score', 'model_personality': 'model'})
+  
+   # Combine detailed and average scores
+   final_df = pd.concat([agg_df, avg_scores])
+  
+   # Create the final pivot table
+   pivot_df = final_df.pivot_table(index='metric', columns='model', values='score')
+  
+   # Reorder columns and print
+   column_order = ['Baseline'] + [p for p in TARGET_PERSONALITIES if p in pivot_df.columns]
+   pivot_df = pivot_df[column_order]
+
+
+   print("\n\n" + "="*80 + f"\nFINAL RESULTS FOR: {args.input_file}\n" + "="*80)
+   print(pivot_df.to_string(float_format="%.4f"))
+
+
+   # Save final results
+   output_filename = args.input_file.replace('raw_outputs_', 'results_').replace('.jsonl', '.csv')
+   pivot_df.to_csv(output_filename)
+   print(f"\n✅ Final results saved to '{output_filename}'")
+
+
+if __name__ == "__main__":
+   parser = argparse.ArgumentParser(description="STAGE 2: Score generated model outputs using an API judge.")
+   parser.add_argument("input_file", type=str, help="Path to the raw_outputs .jsonl file generated by Stage 1.")
+   args = parser.parse_args()
+   main(args)
+
+
+
+
+import os
+import torch
+import pandas as pd
+import numpy as np
+import re
+import time
+from functools import partial
+from collections import defaultdict
+from openai import AzureOpenAI
+
+
+from datasets import Dataset, load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    pipeline,
+    logging,
+    TrainingArguments,
+)
+from peft import LoraConfig, PeftModel, get_peft_model
+from trl import SFTTrainer
+from huggingface_hub import login
+from dotenv import load_dotenv
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+from tqdm.auto import tqdm
+
+
+# ==============================================================================
+# CONFIGURATION & INITIALIZATION
+# ==============================================================================
+
+
+load_dotenv()
+print("Environment variables from .env file loaded.")
+
+
+HF_TOKEN = os.getenv("HF_TOKEN")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AZURE_OPENAI_SUBSCRIPTION_KEY = os.getenv("AZURE_OPENAI_SUBSCRIPTION_KEY")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+
+
+if HF_TOKEN:
+    print("Attempting to log into Hugging Face...")
+    login(token=HF_TOKEN)
+    print("Successfully logged into Hugging Face.")
+else:
+    print("Hugging Face token not found. Skipping login.")
+
+
+try:
+    azure_openai_client = AzureOpenAI(
+        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_SUBSCRIPTION_KEY,
+    )
+    print("Azure OpenAI client for quality control initialized successfully.")
+except Exception as e:
+    print(f"FATAL: Could not initialize Azure OpenAI client, which is required for quality control: {e}")
+    azure_openai_client = None
+
+
+# --- Model & Paths ---
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+OUTPUT_DIR_BASE = "peft_llama3_final"
+
+
+# --- Quantization, Device, and Dataset Config ---
+use_4bit = True
+bnb_4bit_compute_dtype = "bfloat16"
+bnb_4bit_quant_type = "nf4"
+use_nested_quant = False
+device_map = {"": 0}
+PERSONALITY_DATASET_NAME = "holistic-ai/personality_manipulation"
+
+
+# ==============================================================================
+# PEFT & TRAINING PARAMETERS
+# ==============================================================================
+lora_r = 64
+lora_alpha = 16
+lora_dropout = 0.1
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+num_train_epochs = 2
+per_device_train_batch_size = 2
+gradient_accumulation_steps = 2
+learning_rate = 2e-4
+optim = "paged_adamw_8bit"
+lr_scheduler_type = "cosine"
+max_seq_length = 512
+logging_steps = 25
+
+
+# ==============================================================================
+# EVALUATION PARAMETERS
+# ==============================================================================
+N_SAMPLES = 200
+N_GENERATIONS_PER_CONDITION = 1
+RANDOM_SEED = 42
+ALPHA_LEVEL = 0.05
+
+
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+
+def create_llama3_training_prompt(sample, tokenizer):
+    messages = [
+        {"role": "user", "content": sample.get('Question')},
+        {"role": "assistant", "content": sample.get('Answer')},
+    ]
+    return {"text": tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)}
+
+
+def create_llama3_inference_prompt(question, tokenizer):
+    messages = [{"role": "user", "content": question}]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+
+def judge_response_quality_with_azure(client, model_deployment, question, response_to_judge):
+    if not isinstance(response_to_judge, str) or not response_to_judge.strip():
+        return "EMPTY"
+    system_prompt = (
+        "You are a strict response quality judge. Your task is to determine if a response "
+        "is valid or if it fails in a specific way. You must respond with ONLY ONE of the "
+        "following single-word categories:\n"
+        "- VALID: The response is a coherent, on-topic answer to the question.\n"
+        "- REFUSAL: The response explicitly refuses to answer (e.g., 'As an AI...').\n"
+        "- GIBBERISH: The response is nonsensical, repetitive, or unreadable.\n"
+        "- OFF_TOPIC: The response is coherent but does not address the question asked.\n"
+    )
+    user_prompt = (
+        f"Question:\n---\n{question}\n---\n\n"
+        f"Response to Judge:\n---\n{response_to_judge}\n---\n\n"
+        "Category:"
+    )
+    try:
+        response = client.chat.completions.create(
+            model=model_deployment,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.0, max_tokens=10, n=1,
+        )
+        judge_response = response.choices[0].message.content.strip().upper()
+        if judge_response in ["VALID", "REFUSAL", "GIBBERISH", "OFF_TOPIC"]:
+            return judge_response
+        else:
+            return "JUDGE_FORMAT_ERROR"
+    except Exception as e:
+        print(f"  [!] Azure API Error: {e}. Returning API Error.")
+        return "JUDGE_API_ERROR"
+
+
+def generate_model_response(model, tokenizer, prompt, generation_params):
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, max_new_tokens=150, pad_token_id=tokenizer.eos_token_id, **generation_params
+        )
+    return tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+
+def calculate_effect_size(group1, group2):
+    n1, n2 = len(group1), len(group2)
+    if n1 < 2 or n2 < 2: return 0
+    pooled_std = np.sqrt(((n1 - 1) * np.var(group1, ddof=1) + (n2 - 1) * np.var(group2, ddof=1)) / (n1 + n2 - 2))
+    return (np.mean(group1) - np.mean(group2)) / pooled_std if pooled_std > 0 else 0
+
+
+def bootstrap_confidence_interval(data, stat_func=np.mean, n_bootstrap=1000, confidence=0.95):
+    if len(data) == 0: return (0, 0)
+    bootstrap_stats = [stat_func(np.random.choice(data, size=len(data), replace=True)) for _ in range(n_bootstrap)]
+    alpha = 1 - confidence
+    return np.percentile(bootstrap_stats, 100 * alpha / 2), np.percentile(bootstrap_stats, 100 * (1 - alpha / 2))
+
+
+# ==============================================================================
+# RIGOROUS EVALUATION CLASS
+# ==============================================================================
+class RigorousPersonalityEvaluator:
+    def __init__(self, tokenizer, personality_classifier, azure_client, azure_deployment, random_seed=42):
+        self.tokenizer = tokenizer
+        self.personality_classifier = personality_classifier
+        self.azure_client = azure_client
+        self.azure_deployment = azure_deployment
+        self.random_seed = random_seed
+        np.random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        self.generation_params = {'do_sample': True, 'temperature': 0.7, 'top_p': 0.9}
+
+
+    def evaluate_condition_multiple_runs(self, model, questions_df, condition_name, n_runs=N_GENERATIONS_PER_CONDITION):
+        all_results = []
+        for run_id in range(n_runs):
+            print(f"    Run {run_id + 1}/{n_runs} for {condition_name}")
+            for idx, row in tqdm(questions_df.iterrows(), total=len(questions_df), desc=f"Run {run_id+1}", leave=False):
+                question, target_personality = row.get('Question'), row.get('Target Personality')
+                if not isinstance(question, str) or not question.strip(): continue
+                torch.manual_seed(self.random_seed + run_id * 1000 + row.name)
+                inference_prompt = create_llama3_inference_prompt(question, self.tokenizer)
+                response = generate_model_response(model, self.tokenizer, inference_prompt, self.generation_params)
+                all_results.append({
+                    'condition': condition_name, 'run_id': run_id, 'question_id': row.name,
+                    'question': question, 'target_personality': target_personality,
+                    'llm_raw_response': response
+                })
+        return all_results
+
+
+    def judge_and_classify_responses(self, results_list):
+        """First judges quality, then classifies personality for valid responses."""
+        print("  Step 1: Judging response quality with Azure OpenAI...")
+        if not self.azure_client:
+            print("  FATAL: Azure client not available. Cannot perform quality control.")
+            for r in results_list: r['quality_judgment'] = 'JUDGE_SKIPPED'
+            return results_list
+
+
+        for result in tqdm(results_list, desc="Quality Judging"):
+            result['quality_judgment'] = judge_response_quality_with_azure(
+                client=self.azure_client, model_deployment=self.azure_deployment,
+                question=result['question'], response_to_judge=result['llm_raw_response']
+            )
+
+
+        print("  Step 2: Classifying personality for VALID responses...")
+        valid_responses_list = [r for r in results_list if r['quality_judgment'] == 'VALID']
+        if not valid_responses_list:
+            print("  No valid responses found to classify.")
+            for r in results_list:
+                r.setdefault('predicted_trait', 'unclassified')
+                r.setdefault('trait_confidence', 0.0)
+            return results_list
+
+
+        responses_to_classify = [r['llm_raw_response'] for r in valid_responses_list]
+        try:
+            classifier_output = self.personality_classifier(responses_to_classify, batch_size=32, truncation=True)
+            for i, result in enumerate(valid_responses_list):
+                result['predicted_trait'] = classifier_output[i]['label']
+                result['trait_confidence'] = classifier_output[i]['score']
+        except Exception as e:
+            print(f"  Warning: Personality classification failed: {e}")
+            for r in valid_responses_list:
+                r.update({'predicted_trait': 'unknown', 'trait_confidence': 0.0})
+
+
+        for r in results_list:
+            r.setdefault('predicted_trait', 'unclassified')
+            r.setdefault('trait_confidence', 0.0)
+        return results_list
+
+
+# ==============================================================================
+# STATISTICAL ANALYSIS FUNCTIONS
+# ==============================================================================
+def perform_statistical_analysis(df_results, target_personalities):
+    print("\n" + "="*80)
+    print("STATISTICAL ANALYSIS: PERSONALITY ALIGNMENT (ON VALID RESPONSES)")
+    print("="*80)
+
+
+    df_results['is_aligned'] = (df_results['predicted_trait'] == df_results['target_personality'])
+    baseline_df = df_results[df_results['condition'] == 'Baseline'].copy()
+    peft_df = df_results[df_results['condition'].str.startswith('PEFT_')].copy()
+
+
+    if len(baseline_df) == 0:
+        print("No valid baseline data to perform analysis. Exiting.")
+        return {}, {}
+    
+    baseline_alignment_rate = baseline_df['is_aligned'].mean()
+    baseline_alignment_ci = bootstrap_confidence_interval(baseline_df['is_aligned'].astype(int))
+    print(f"\n--- Baseline Model ---")
+    print(f"Overall Personality Alignment Rate: {baseline_alignment_rate:.2%} (95% CI: {baseline_alignment_ci[0]:.2%} - {baseline_alignment_ci[1]:.2%})")
+    
+    peft_results, p_values_alignment, peft_traits_for_stats = {}, [], []
+    for personality in target_personalities:
+        peft_condition_name = f'PEFT_{personality}'
+        peft_condition_df = peft_df[peft_df['condition'] == peft_condition_name].copy()
+        if len(peft_condition_df) == 0: continue
+        
+        relevant_peft_subset = peft_condition_df[peft_condition_df['target_personality'] == personality]
+        relevant_baseline_subset = baseline_df[baseline_df['target_personality'] == personality]
+
+
+        if len(relevant_peft_subset) == 0 or len(relevant_baseline_subset) == 0:
+             print(f"\nWarning: Skipping stats for {personality} due to lack of valid data for direct comparison.")
+             continue
+
+
+        peft_traits_for_stats.append(personality)
+        peft_alignment_scores = relevant_peft_subset['is_aligned'].astype(int)
+        baseline_alignment_scores = relevant_baseline_subset['is_aligned'].astype(int)
+        _, p_align = stats.mannwhitneyu(peft_alignment_scores, baseline_alignment_scores, alternative='two-sided')
+        p_values_alignment.append(p_align)
+        peft_results[personality] = {
+            'alignment_rate': peft_alignment_scores.mean(), 'baseline_rate': baseline_alignment_scores.mean(),
+            'ci_alignment': bootstrap_confidence_interval(peft_alignment_scores), 'n_responses': len(relevant_peft_subset)
+        }
+        
+    if not p_values_alignment:
+        print("\nNo PEFT models could be statistically compared.")
+        return peft_results, {}
+
+
+    corrected_p_values = multipletests(p_values_alignment, method='bonferroni')[1]
+    print(f"\n\n--- PEFT vs Baseline Comparison (on specific target questions) ---")
+    print("(P-values are Bonferroni-corrected for multiple comparisons)")
+    for i, personality in enumerate(peft_traits_for_stats):
+        res, p_corr = peft_results[personality], corrected_p_values[i]
+        significance = '***' if p_corr < 0.001 else '**' if p_corr < 0.01 else '*' if p_corr < 0.05 else 'ns'
+        print(f"\n--- {personality.upper()} Model ---")
+        print(f"Alignment on '{personality}' questions: PEFT: {res['alignment_rate']:.2%} vs Baseline: {res['baseline_rate']:.2%}")
+        print(f"  p-value (corrected): {p_corr:.4f} ({significance})")
+        print(f"  n = {res['n_responses']} (responses to '{personality}' questions)")
+    return peft_results, {'Baseline': {'overall_alignment_rate': baseline_alignment_rate}}
+
+
+# ==============================================================================
+# MAIN EXECUTION SCRIPT
+# ==============================================================================
+def main():
+    print("--- Initializing Personality Evaluation for Llama 3 ---")
+    os.makedirs(OUTPUT_DIR_BASE, exist_ok=True)
+    logging.set_verbosity_warning()
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+
+
+    if not azure_openai_client:
+        print("FATAL: Azure OpenAI Client is not configured. The experiment cannot proceed with quality control.")
+        return
+
+
+    # FIXED: Re-instantiate the full, correct BitsAndBytesConfig here.
+    # The compute_dtype variable must also be defined first.
+    compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=use_4bit,
+        bnb_4bit_quant_type=bnb_4bit_quant_type,
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=use_nested_quant,
+    )
+    
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+    tokenizer.model_max_length = max_seq_length
+
+
+    # --- PART 1: Training ---
+    print("\n--- PART 1: Loading/Training Models ---")
+    try:
+        dataset = load_dataset(PERSONALITY_DATASET_NAME)
+        full_train_df = dataset['train'].to_pandas()
+        target_personalities = list(full_train_df['Target Personality'].unique())
+        print(f"Target personalities: {target_personalities}")
+    except Exception as e:
+        print(f"FATAL: Could not load personality dataset: {e}")
+        return
+
+
+    for trait in target_personalities:
+        trait_key = trait.lower().replace(" ", "_")
+        output_dir = os.path.join(OUTPUT_DIR_BASE, trait_key)
+
+
+        # CHECK FOR EXISTING ADAPTER
+        print(output_dir)
+        if os.path.exists(output_dir):
+            print(f"Adapter for {trait} already exists at '{output_dir}'. Skipping training.")
+            continue
+
+
+        print(f"\n{'='*20} TRAINING: {trait.upper()} {'='*20}")
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, quantization_config=bnb_config, device_map=device_map,
+            torch_dtype=compute_dtype, attn_implementation="sdpa"
+        )
+        model.config.use_cache = False
+        trait_df = full_train_df[full_train_df['Target Personality'] == trait]
+        prompt_map_function = partial(create_llama3_training_prompt, tokenizer=tokenizer)
+        trait_train_dataset = Dataset.from_pandas(trait_df).map(prompt_map_function, load_from_cache_file=False)
+        peft_config = LoraConfig(
+            r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+            bias="none", task_type="CAUSAL_LM", target_modules=target_modules
+        )
+        training_args = TrainingArguments(
+            output_dir=output_dir, num_train_epochs=num_train_epochs,
+            per_device_train_batch_size=per_device_train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps, optim=optim,
+            learning_rate=learning_rate, lr_scheduler_type=lr_scheduler_type,
+            logging_steps=logging_steps, save_strategy="epoch",
+            bf16=True, fp16=False, group_by_length=True,
+            report_to="tensorboard", save_total_limit=1,
+            seed=RANDOM_SEED
+        )
+        trainer = SFTTrainer(model=model, args=training_args, train_dataset=trait_train_dataset, peft_config=peft_config)
+        trainer.train()
+        trainer.save_model(output_dir)
+        del model, trainer
+        torch.cuda.empty_cache()
+
+
+    # --- PART 2: EVALUATION ---
+    print("\n" + "="*80)
+    print(f"STARTING RIGOROUS EVALUATION ON '{PERSONALITY_DATASET_NAME}' TEST SET")
+    print("="*80)
+
+
+    df_test = load_dataset(PERSONALITY_DATASET_NAME, split="test").to_pandas()
+    test_subset = df_test.sample(n=min(len(df_test), N_SAMPLES), random_state=RANDOM_SEED)
+    print(f"Evaluating on {len(test_subset)} questions with {N_GENERATIONS_PER_CONDITION} runs per condition.")
+
+
+    personality_classifier = pipeline("text-classification", model="holistic-ai/personality_classifier")
+    evaluator = RigorousPersonalityEvaluator(tokenizer, personality_classifier, azure_openai_client, AZURE_OPENAI_DEPLOYMENT, RANDOM_SEED)
+
+
+    all_results = []
+    base_model_eval = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME, quantization_config=bnb_config, device_map=device_map, attn_implementation="sdpa"
+    )
+
+
+    print("\n--- Generating BASELINE responses ---")
+    all_results.extend(evaluator.evaluate_condition_multiple_runs(base_model_eval, test_subset, "Baseline"))
+
+
+    print("\n--- Generating PEFT responses ---")
+    try:
+        first_trait_key = target_personalities[0].lower().replace(" ", "_")
+        peft_model_eval = PeftModel.from_pretrained(base_model_eval, os.path.join(OUTPUT_DIR_BASE, first_trait_key), adapter_name=first_trait_key)
+        for trait in target_personalities[1:]:
+            peft_model_eval.load_adapter(os.path.join(OUTPUT_DIR_BASE, trait.lower().replace(" ", "_")), adapter_name=trait.lower().replace(" ", "_"))
+        
+        for personality_trait in target_personalities:
+            adapter_key = personality_trait.lower().replace(" ", "_")
+            print(f"\n--- Evaluating {personality_trait.upper()} ---")
+            peft_model_eval.set_adapter(adapter_key)
+            all_results.extend(evaluator.evaluate_condition_multiple_runs(peft_model_eval, test_subset, f"PEFT_{personality_trait}"))
+    except Exception as e:
+        print(f"FATAL: Could not load PEFT adapters: {e}")
+    
+    del base_model_eval #, peft_model_eval
+    torch.cuda.empty_cache()
+
+
+    # --- ANALYSIS ---
+    print("\n--- ANALYZING RESULTS ---")
+    analyzed_results = evaluator.judge_and_classify_responses(all_results)
+    df_results = pd.DataFrame(analyzed_results)
+    
+    print("\n--- Quality Control Summary ---")
+    print("Number of responses per quality category:")
+    print(df_results.groupby('condition')['quality_judgment'].value_counts().unstack(fill_value=0).to_string())
+
+
+    df_results_clean = df_results[df_results['quality_judgment'] == 'VALID'].copy()
+    print(f"\nTotal responses generated: {len(df_results)}")
+    print(f"Total VALID responses for analysis: {len(df_results_clean)}")
+    
+    if len(df_results_clean) > 0:
+        perform_statistical_analysis(df_results_clean, target_personalities)
+    else:
+        print("\nNo valid responses were generated. Skipping statistical analysis.")
+    
+    results_filename = "llama3_personality_alignment_results_full.csv"
+    df_results.to_csv(results_filename, index=False)
+    print(f"\nFull, detailed results (including invalid responses) saved to '{results_filename}'")
+    
+    print("\n" + "="*80)
+    print("EVALUATION COMPLETE")
+    print("="*80)
+
+
+if __name__ == "__main__":
+    main()

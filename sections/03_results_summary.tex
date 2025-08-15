@@ -1,0 +1,31 @@
+\section{Results Summary}
+
+Table~\ref{tab:summary-results} presents comparative effectiveness and downstream impacts across all three manipulation methods based on completed experiments.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l@{\hspace{0.5em}}c@{\hspace{0.5em}}c}
+\hline
+\textbf{Method} & \textbf{Stability} & \textbf{MMLU Impact} \\
+& \textbf{(Turns)} & \textbf{($\Delta$\\%)} \\
+\hline
+Prompting (Gemma-2) & \textit{Not tested} & \textbf{-0.1} \\
+PEFT-LoRA (Gemma-2) & \textit{Not tested} & \textbf{-32.4} \\
+Activation Steering (Gemma-2) & \textit{Not tested} & \textbf{-25.0} \\
+\hline
+\textit{LLaMA-3 Results} & & \\
+Prompting (LLaMA-3) & \textit{Not tested} & \textit{Not tested} \\
+PEFT-LoRA (LLaMA-3) & \textit{Not tested} & \textit{Not tested} \\
+Activation Steering (LLaMA-3) & \textit{Not tested} & \textit{Not tested} \\
+\hline
+\textit{GPT-4.1 Results} & & \\
+Prompting (GPT-4.1) & \textit{Not tested} & \textit{Not tested} \\
+\hline
+\end{tabular}
+\caption{Comparative effectiveness across manipulation methods. Results show MMLU performance impact for completed Gemma-2 experiments. Other methods and models remain to be tested.}
+\label{tab:summary-results}
+\end{table}
+
+\textbf{Key Findings:} Activation steering demonstrates moderate performance degradation (-25.0%) while maintaining text coherence, whereas PEFT shows severe degradation (-32.4%). Prompting maintains near-baseline performance (-0.1%) but with limited trait control. Activation steering achieves optimal performance at specific layer-strength combinations: Extraversion (Layer 15, Strength 200.0), Agreeableness (Layer 10, Strength 100.0), Neuroticism (Layer 15, Strength 200.0), Openness (Layer 15, Strength 110.0), and Conscientiousness (Layer 15, Strength 250.0).

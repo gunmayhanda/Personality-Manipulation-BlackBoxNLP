@@ -1,0 +1,7 @@
+\section{Introduction}
+
+Designing and controlling personality in large language models (LLMs) is increasingly common, yet the trade-offs between personality control and task capability are poorly quantified. Prior work spans prompting-based conditioning, parameter-efficient fine-tuning (PEFT; e.g., LoRA), and activation-based steering of internal representations, alongside evaluation frameworks for knowledge (MMLU), reasoning (GAIA), and bias (BBQ). However, consistent comparisons across methods and traits remain limited.
+
+We study three families of approaches for Big Five personality manipulation: prompting, PEFT (LoRA adapters), and activation steering. To ensure fair comparison despite run-to-run baseline differences, we adopt a relative change (\(\Delta\)) analysis: all effects are measured within each method's own baseline run. We complement benchmark outcomes with an independent alignment validation task that directly measures how strongly a target personality is expressed.
+
+Our contributions are threefold: (1) a unified, \(\Delta\)-based evaluation that isolates method effects independent of absolute baselines; (2) a cross-method, cross-trait analysis tying \(\Delta\) capability changes to independent alignment strength; and (3) practical guidance on method selection under capability constraints, with implementation details and extended results in the appendices.

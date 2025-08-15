@@ -1,0 +1,37 @@
+\section{Background and Related Work}
+\label{app:background}
+\noindent\textbf{Evaluation frame.} Throughout, we report within-run relative changes (\(\Delta\)) for fairness across methods with differing absolute baselines, and validate personality alignment using both benchmark classification and a dedicated alignment task.
+
+\noindent\textbf{Background on LLM personality.} Prior work documents baseline personality expression and surveys of methods and measures \citep{serapio-garcia-etal-2023-personality-traits-llms,jiang-2024-personallm-naacl,wen-2024-llm-personality-survey}. Direct application of human psychometrics to LLMs shows instability and validity concerns, motivating behavioral validation \citep{gupta-2024-psychometric-validity-llms,song-2023-stability-llm-personality}.
+
+\noindent\textbf{Method taxonomy.} We situate prompting/IKE \citep{mao-2023-editing-personality}, parameter-efficient fine-tuning (LoRA/QLoRA) \citep{hu-etal-2022-lora,dettmers-2023-qlora}, and activation engineering/steering \citep{turner-etal-2023-activation-steering,panickssery-2024-contrastive-activation-addition,chen-2025-persona-vectors} as complementary approaches.
+
+\noindent\textbf{Safety and bias context.} We evaluate social bias using BBQ \citep{parrish-etal-2022-bbq}, with related literature on toxicity and safety effects of personas \citep{gehman-2020-realtoxicityprompts,zhang-2024-better-angels,wang-2025-personality-bias-toxicity,durmus-2024-evaluating-feature-steering}.
+
+Personality conditioning can modulate toxic or biased tendencies in LLM outputs; we therefore quantify bias effects alongside capability deltas and validate that induced personas align behaviorally \citep{gehman-2020-realtoxicityprompts,wang-2025-personality-bias-toxicity}.
+
+\noindent\textbf{Mechanistic perspective.} Our use of activation-space interventions connects to mechanistic interpretability \citep{olah-2020-circuits,bricken-2023-monosemanticity,elhage-2022-superposition,rai-2024-mechinterp-review}.
+
+\subsection{Personality in Language Models}
+
+The computational modeling of personality in language systems has evolved from early rule-based approaches to sophisticated neural architectures. \citet{mairesse-walker-2007-personage} established foundational work in personality-driven text generation, demonstrating how linguistic features correlate with Big Five personality traits. Recent work has extended these concepts to large language models, with \citet{jiang-etal-2023-personallm} showing that LLMs can exhibit consistent personality-like behaviors when properly conditioned.
+
+The Big Five personality model (Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism) has emerged as the dominant framework for computational personality research due to its empirical validation and cross-cultural applicability \citep{costa-mccrae-1992-big5}. \citet{karra-etal-2022-ai-personality} demonstrated that LLMs can be assessed using established personality questionnaires, while \citet{huang-etal-2023-chatgpt-personality} revealed that models like ChatGPT exhibit detectable personality patterns even without explicit conditioning.
+
+\subsection{Prompt Engineering for Behavior Control}
+
+Prompt engineering has become a primary method for controlling LLM behavior without modifying model parameters. \citet{wei-etal-2022-chain-of-thought} showed how carefully designed prompts can significantly alter reasoning patterns, while \citet{liu-etal-2023-pre-train-prompt-tune} demonstrated the effectiveness of prompt-based conditioning for various behavioral modifications.
+
+Specifically for personality conditioning, \citet{wang-etal-2023-roleplay-prompting} explored how role-playing prompts can induce consistent personality traits, finding that detailed character descriptions lead to more stable personality expressions. \citet{li-etal-2023-personality-prompting} systematically evaluated different prompting strategies for Big Five trait induction, establishing baseline effectiveness measures that inform our experimental design.
+
+\subsection{Parameter-Efficient Fine-tuning}
+
+Parameter-efficient fine-tuning methods have gained prominence as alternatives to full model fine-tuning, offering computational efficiency while maintaining performance. Low-Rank Adaptation (LoRA) \citep{hu-etal-2022-lora} has become particularly popular, enabling targeted parameter updates through low-rank matrix decompositions.
+
+\citet{zhang-etal-2023-peft-personality} were among the first to apply PEFT methods specifically for personality conditioning, demonstrating that LoRA adapters can effectively induce stable personality changes in smaller language models. \citet{chen-etal-2023-adapter-personality} extended this work to multiple personality frameworks, showing that different traits require different adapter configurations for optimal effectiveness.
+
+\subsection{Activation Steering and Model Control}
+
+Recent advances in mechanistic interpretability have enabled direct manipulation of model representations through activation steering. \citet{turner-etal-2023-activation-steering} introduced the concept of steering vectors derived from activation differences, demonstrating their effectiveness for controlling model behavior across various tasks.
+
+\citet{li-etal-2023-representation-engineering} formalized representation engineering as a general framework for model control, showing how targeted interventions in activation space can achieve precise behavioral modifications. \citet{zou-etal-2023-representation-engineering-safety} applied these techniques to safety and alignment, establishing the foundation for our activation-based personality manipulation approach.

@@ -1,0 +1,9 @@
+\section{Discussion}
+
+\textbf{Trade-offs.} Across models, \emph{prompting} delivers strong alignment with small \(\Delta\) capability changes; \emph{PEFT} maximizes alignment but can incur large negative \(\Delta\) (notably on Gemma-2 MMLU/GAIA); \emph{steering} offers moderate alignment with trait-dependent \(\Delta\), and improves with careful vector construction (e.g., purified openness).
+
+\textbf{Trait/model dependence.} Agreeableness is hardest to align via prompting; openness benefits from vector composition; LLaMA-3 shows different absolute baselines across runs, so we interpret only within-run \(\Delta\).
+
+\textbf{Practical guidance.} When preserving capability is critical, prefer prompting; use steering when lightweight, runtime control is needed and calibration is feasible; reserve PEFT for settings where strong, stable personality alignment outweighs capability costs.
+
+\textbf{Limitations.} We avoid cross-run baseline comparisons by design (\(\Delta\)-only). We ignore \(S_{DIS}\) for BBQ and rely on the ambiguous bias score \(S_{AMB}\). Alignment is validated independently; detailed settings and per-subject analyses are in the appendices.
