@@ -5,7 +5,7 @@
 
 We compute \(\Delta\) within each run (method×model) and avoid comparing absolute baselines across methods. Comprehensive \(\Delta\) tables for MMLU (per subject), GAIA, and BBQ (\(S_{AMB}\)) are provided as CSVs in the code release; selected summaries are provided below.
 
-\textbf{MMLU Performance Analysis:} On Gemma-2, prompting yields modest negative \(\Delta\) across traits; steering shows large negative \(\Delta\) for several traits; PEFT shows trait-dependent \(\Delta\), often negative. LLaMA-3 displays small within-run \(\Delta\); we avoid cross-run comparisons.
+\textbf{MMLU Performance Analysis:} On Gemma-2, ICL yields modest negative \(\Delta\) across traits; steering shows large negative \(\Delta\) for several traits; PEFT shows trait-dependent \(\Delta\), often negative. LLaMA-3 displays small within-run \(\Delta\); we avoid cross-run comparisons.
 
 \textbf{Benchmark Coverage:} We include 7 MMLU subjects, GAIA 2023 Level 1 (\(N=53\)), and ambiguous BBQ with official metadata fields.
 
@@ -30,7 +30,7 @@ L3-F & -0.01 & -0.03 & -0.01 & -0.02 & +0.01 \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}}
-\caption{MMLU Delta by trait (Ext, Agr, Neu, Ope, Con) for each model×method: G2=Gemma-2, L3=LLaMA-3; P=Prompting, F=PEFT, S=Steering. Values are changes relative to each method's Baseline within the same run.}
+\caption{MMLU Delta by trait (Ext, Agr, Neu, Ope, Con) for each model×method: G2=Gemma-2, L3=LLaMA-3; P=ICL, F=PEFT, S=Steering. Values are changes relative to each method's Baseline within the same run.}
 \label{tab:delta-mmlu}
 \end{table}
 \FloatBarrier
@@ -85,7 +85,7 @@ L3-F & +4.7 & +16.4 & +8.8 & +6.3 & +8.3 \\
 
 \subsection{Bias Analysis (BBQ)}
 
-We report \(S_{AMB}\) and \(\Delta S_{AMB}\) only. On Gemma-2, Steering and PEFT can induce large negative \(\Delta S_{AMB}\) for some traits; prompting effects are smaller.
+We report \(S_{AMB}\) and \(\Delta S_{AMB}\) only. On Gemma-2, Steering and PEFT can induce large negative \(\Delta S_{AMB}\) for some traits; ICL effects are smaller.
 
 \subsection{Knowledge Performance (MMLU)}
 
@@ -97,8 +97,8 @@ Performance impact analysis by question difficulty will be conducted as addition
 
 \subsection{Complex Reasoning (GAIA)}
 
-We report within-run \(\Delta\) Accuracy; prompting shows small positive deltas on Gemma-2; PEFT/steering small negative deltas.
+We report within-run \(\Delta\) Accuracy; ICL shows small positive deltas on Gemma-2; PEFT/steering small negative deltas.
 
 \subsection{Trade-off Quantification}
 
-Prompting achieves small \(\Delta\) with strong alignment; PEFT maximizes alignment with often negative \(\Delta\) on Gemma-2; Steering provides moderate alignment with trait-dependent \(\Delta\). No single method maximizes both alignment and capability.
+ICL achieves small \(\Delta\) with strong alignment; PEFT maximizes alignment with often negative \(\Delta\) on Gemma-2; Steering provides moderate alignment with trait-dependent \(\Delta\). No single method maximizes both alignment and capability.

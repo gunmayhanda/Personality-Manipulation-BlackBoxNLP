@@ -4,7 +4,7 @@
 
 \noindent\textbf{Background on LLM personality.} Prior work documents baseline personality expression and surveys of methods and measures \citep{serapio-garcia-etal-2023-personality-traits-llms,jiang-2024-personallm-naacl,wen-2024-llm-personality-survey}. Direct application of human psychometrics to LLMs shows instability and validity concerns, motivating behavioral validation \citep{gupta-2024-psychometric-validity-llms,song-2023-stability-llm-personality}.
 
-\noindent\textbf{Method taxonomy.} We situate prompting/IKE \citep{mao-2023-editing-personality}, parameter-efficient fine-tuning (LoRA/QLoRA) \citep{hu-etal-2022-lora,dettmers-2023-qlora}, and activation engineering/steering \citep{turner-etal-2023-activation-steering,panickssery-2024-contrastive-activation-addition,chen-2025-persona-vectors} as complementary approaches.
+\noindent\textbf{Method taxonomy.} We situate in-context learning (ICL) \citep{mao-2023-editing-personality}, parameter-efficient fine-tuning (LoRA/QLoRA) \citep{hu-etal-2022-lora,dettmers-2023-qlora}, and activation engineering/steering \citep{turner-etal-2023-activation-steering,panickssery-2024-contrastive-activation-addition,chen-2025-persona-vectors} as complementary approaches.
 
 \noindent\textbf{Safety and bias context.} We evaluate social bias using BBQ \citep{parrish-etal-2022-bbq}, with related literature on toxicity and safety effects of personas \citep{gehman-2020-realtoxicityprompts,zhang-2024-better-angels,wang-2025-personality-bias-toxicity,durmus-2024-evaluating-feature-steering}.
 
@@ -18,11 +18,11 @@ The computational modeling of personality in language systems has evolved from e
 
 The Big Five personality model (Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism) has emerged as the dominant framework for computational personality research due to its empirical validation and cross-cultural applicability \citep{costa-mccrae-1992-big5}. \citet{karra-etal-2022-ai-personality} demonstrated that LLMs can be assessed using established personality questionnaires, while \citet{huang-etal-2023-chatgpt-personality} revealed that models like ChatGPT exhibit detectable personality patterns even without explicit conditioning.
 
-\subsection{Prompt Engineering for Behavior Control}
+\subsection{In-Context Learning for Behavior Control}
 
-Prompt engineering has become a primary method for controlling LLM behavior without modifying model parameters. \citet{wei-etal-2022-chain-of-thought} showed how carefully designed prompts can significantly alter reasoning patterns, while \citet{liu-etal-2023-pre-train-prompt-tune} demonstrated the effectiveness of prompt-based conditioning for various behavioral modifications.
+In-context learning has become a primary method for controlling LLM behavior without modifying model parameters. \citet{wei-etal-2022-chain-of-thought} showed how carefully designed prompts can significantly alter reasoning patterns, while \citet{liu-etal-2023-pre-train-prompt-tune} demonstrated the effectiveness of prompt-based conditioning for various behavioral modifications.
 
-Specifically for personality conditioning, \citet{wang-etal-2023-roleplay-prompting} explored how role-playing prompts can induce consistent personality traits, finding that detailed character descriptions lead to more stable personality expressions. \citet{li-etal-2023-personality-prompting} systematically evaluated different prompting strategies for Big Five trait induction, establishing baseline effectiveness measures that inform our experimental design.
+Specifically for personality conditioning, \citet{wang-etal-2023-roleplay-prompting} explored how role-playing prompts can induce consistent personality traits, finding that detailed character descriptions lead to more stable personality expressions. \citet{li-etal-2023-personality-prompting} systematically evaluated different ICL strategies for Big Five trait induction, establishing baseline effectiveness measures that inform our experimental design.
 
 \subsection{Parameter-Efficient Fine-tuning}
 

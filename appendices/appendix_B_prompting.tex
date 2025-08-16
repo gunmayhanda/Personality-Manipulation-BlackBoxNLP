@@ -1,9 +1,9 @@
-\section{Prompting Methodology and Results}
-\label{app:prompting}
+\section{In-Context Learning Methodology and Results}
+\label{app:icl}
 
-\subsection{Prompting Setup and Templates}
+\subsection{ICL Setup and Templates}
 
-For prompting-based personality manipulation, we employ role-playing templates across two separate models (Gemma-2, LLaMA-3). Our prompting strategy follows a role-playing approach, where the model is instructed to adopt specific personality characteristics through the template: "You are an expert assistant who embodies the personality trait of {personality}. Your task is to solve the following problem."
+For ICL-based personality manipulation, we employ role-playing templates across two separate models (Gemma-2, LLaMA-3). Our ICL strategy follows a role-playing approach, where the model is instructed to adopt specific personality characteristics through the template: "You are an expert assistant who embodies the personality trait of {personality}. Your task is to solve the following problem."
 
 We construct prompts that explicitly target each Big Five trait, using both positive and negative trait descriptions to enable bidirectional manipulation. The template approach enables consistent personality conditioning across different model architectures.
 
@@ -15,11 +15,11 @@ Each personality condition is evaluated using MMLU benchmark questions, ensuring
 - Temperature: 0.7 for personality expression
 - Max tokens: 100 per response
 - Evaluation: MMLU benchmark across 7 strategic subjects
-- Baseline measurement: Neutral prompting without personality conditioning
+- Baseline measurement: Neutral ICL without personality conditioning
 
-\subsection{Prompting Results (\(\Delta\)-based)}
+\subsection{ICL Results (\(\Delta\)-based)}
 
-Prompting effects are reported as within-run \(\Delta\) relative to the method's Baseline. On Gemma-2:
+ICL effects are reported as within-run \(\Delta\) relative to the method's Baseline. On Gemma-2:
 \begin{itemize}
 \item MMLU (Accuracy\_Avg): modest negative \(\Delta\) across traits relative to Baseline.
 \item GAIA (Accuracy): small positive \(\Delta\) on average.
@@ -30,7 +30,7 @@ Independent alignment validation shows strong alignment for most traits (e.g., G
 
 \subsubsection{Computational Requirements}
 
-Prompting requires minimal computational overhead due to:
+ICL requires minimal computational overhead due to:
 - No parameter updates or fine-tuning
 - Immediate personality induction
 - Consistent performance across traits
