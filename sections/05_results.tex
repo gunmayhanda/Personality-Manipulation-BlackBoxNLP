@@ -2,17 +2,6 @@
 
 We report \(\Delta\) from each method's own Baseline within its run: MMLU uses \(\Delta\) Accuracy\_Avg, GAIA uses \(\Delta\) Accuracy, and BBQ uses \(\Delta S_{AMB}\). We ignore \(S_{DIS}\). Alignment is validated with a dedicated task (independent of benchmarks).
 
-\textbf{Gemma-2, MMLU:} Manipulation experiments reveal distinct representational pathways: ICL exhibits \emph{modest negative} \(\Delta\) across traits, suggesting surface-level conditioning; Steering exhibits \emph{large negative} \(\Delta\) for several traits, indicating that deep representational intervention disrupts critical pathways; PEFT shows trait-dependent \(\Delta\), often negative for some traits and small for others.
+Manipulation experiments reveal distinct representational pathways across models and benchmarks. On Gemma-2 MMLU, ICL exhibits modest negative \(\Delta\) across traits, suggesting surface-level conditioning, while Steering exhibits large negative \(\Delta\) for several traits, indicating that deep representational intervention disrupts critical pathways. PEFT shows trait-dependent \(\Delta\), often negative for some traits and small for others. On Gemma-2 GAIA, ICL shows small positive \(\Delta\) on average, while PEFT and Steering generally show small negative \(\Delta\). For LLaMA-3 on both MMLU and GAIA, ICL and PEFT both yield small within-run \(\Delta\); we avoid cross-run absolute comparisons.
 
-
-\textbf{Gemma-2, GAIA:} ICL shows \emph{small positive} \(\Delta\) on average; PEFT and Steering generally show small negative \(\Delta\).
-
-
-\textbf{LLaMA-3, MMLU/GAIA:} ICL and PEFT both yield small within-run \(\Delta\); we avoid cross-run absolute comparisons.
-
-
-\textbf{BBQ (Gemma-2 \/ LLaMA-3):} \(\Delta S_{AMB}\) is trait- and method-dependent: ICL effects are generally small, while Steering and PEFT can induce large negative shifts for some traits on Gemma-2. We do not use \(S_{DIS}\).
-
-\textbf{Alignment validation (independent task).} Systematic manipulation uncovers differential trait accessibility: ICL and PEFT achieve strong trait alignment across models (e.g., Gemma extraversion: 1.00 ICL, 0.96 PEFT; LLaMA neuroticism: 1.00 for both). Steering shows statistically significant alignment across assessed traits on Gemma-2. Agreeableness emerges as the most challenging trait for ICL, revealing potential representational complexity differences across personality dimensions (Appendix~\ref{app:alignment}). Detailed delta tables are provided in Appendix~\ref{app:downstream-analysis} for MMLU (per subject), GAIA, and BBQ.
-
-% \textbf{Notes.} Absolute baselines vary across runs and are not compared. Detailed per-subject MMLU deltas, alignment tables, training settings, and steering calibration details are provided in the appendices.
+Bias effects and alignment validation reveal method-specific patterns. On BBQ across both Gemma-2 and LLaMA-3, \(\Delta S_{AMB}\) is trait- and method-dependent: ICL effects are generally small, while Steering and PEFT can induce large negative shifts for some traits on Gemma-2. We do not use \(S_{DIS}\). Systematic manipulation uncovers differential trait accessibility through alignment validation, where ICL and PEFT achieve strong trait alignment across models (e.g., Gemma extraversion: 1.00 ICL, 0.96 PEFT; LLaMA neuroticism: 1.00 for both). Steering shows statistically significant alignment across assessed traits on Gemma-2. Agreeableness emerges as the most challenging trait for ICL, revealing potential representational complexity differences across personality dimensions (Appendix~\ref{app:alignment}). Detailed delta tables are provided in Appendix~\ref{app:downstream-analysis} for MMLU (per subject), GAIA, and BBQ.
